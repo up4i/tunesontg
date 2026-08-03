@@ -3,6 +3,7 @@
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
   ChevronRight,
   House,
   Inbox,
@@ -12,15 +13,19 @@ import {
   LoaderCircle,
   MoreHorizontal,
   Music2,
+  Pause,
   Play,
   Plus,
+  Repeat2,
   Search,
   Send,
   Shuffle,
+  SkipBack,
+  SkipForward,
   Sparkles,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LibraryPayload, Playlist, Track } from "@/lib/types";
 
 type Tab = "home" | "library" | "playlists";
@@ -57,11 +62,39 @@ function formatCollectionDuration(seconds: number): string {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} hr ${minutes % 60} min` : `${minutes} min`;
 }
 
-function Cover({ seed, size = "medium", label }: { seed: number; size?: "small" | "medium" | "large"; label: string }) {
+function formatPlaybackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+}
+
+function randomized<T>(items: T[]): T[] {
+  const result = [...items];
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(Math.random() * (index + 1));
+    [result[index], result[target]] = [result[target], result[index]];
+  }
+  return result;
+}
+
+function Cover({
+  seed,
+  size = "medium",
+  label,
+  artworkUrl,
+}: {
+  seed: number;
+  size?: "small" | "medium" | "large" | "hero";
+  label: string;
+  artworkUrl?: string;
+}) {
   return (
     <div className={`cover cover-${seed % 8} cover-${size}`} aria-label={`${label} artwork`}>
-      <div className="cover-orbit" />
-      <Music2 aria-hidden="true" />
+      {artworkUrl ? (
+        <span className="cover-image" style={{ backgroundImage: `url(${artworkUrl})` }} />
+      ) : (
+        <><div className="cover-orbit" /><Music2 aria-hidden="true" /></>
+      )}
     </div>
   );
 }
@@ -74,7 +107,11 @@ function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?
   return (
     <div className={`playlist-cover ${large ? "playlist-cover-large" : ""}`} aria-label={`${playlist.name} cover`}>
       {tiles.map((track, index) => (
-        <div className={`playlist-tile cover-${track ? track.artworkSeed % 8 : (index + 2) % 8}`} key={track?.id ?? index}>
+        <div
+          className={`playlist-tile cover-${track ? track.artworkSeed % 8 : (index + 2) % 8}`}
+          key={track?.id ?? index}
+          style={track?.artworkUrl ? { backgroundImage: `url(${track.artworkUrl})` } : undefined}
+        >
           {index === 3 && !track ? <Music2 aria-hidden="true" /> : null}
         </div>
       ))}
@@ -95,8 +132,8 @@ function TrackRow({
 }) {
   return (
     <div className="track-row">
-      <button className="track-main" onClick={onPlay} aria-label={`Send ${track.title} to Telegram`}>
-        {ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} />}
+      <button className="track-main" onClick={onPlay} aria-label={`Play ${track.title}`}>
+        {ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />}
         <span className="track-copy">
           <span className="track-title">{track.title}</span>
           <span className="track-artist">{track.artist}</span>
@@ -133,6 +170,7 @@ function Skeleton() {
 }
 
 export function MusicApp() {
+  const audioRef = useRef<HTMLAudioElement>(null);
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -143,6 +181,14 @@ export function MusicApp() {
   const [mutating, setMutating] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const [error, setError] = useState<string | null>(null);
+  const [queue, setQueue] = useState<Track[]>([]);
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
+  const [playerOpen, setPlayerOpen] = useState(false);
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
+  const [repeatOne, setRepeatOne] = useState(false);
 
   const loadLibrary = useCallback(async () => {
     try {
@@ -166,8 +212,10 @@ export function MusicApp() {
       }
       webApp?.ready();
       webApp?.expand();
-      webApp?.setHeaderColor("#11110f");
-      webApp?.setBackgroundColor("#11110f");
+      if (webApp?.isVersionAtLeast("6.1")) {
+        webApp.setHeaderColor("#11110f");
+        webApp.setBackgroundColor("#11110f");
+      }
       void loadLibrary();
     };
     timer = window.setTimeout(start, 0);
@@ -181,6 +229,7 @@ export function MusicApp() {
   }, [toast]);
 
   const selectedPlaylist = library?.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
+  const currentTrack = queue[queueIndex] ?? null;
   const filteredTracks = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     if (!query) return library?.tracks ?? [];
@@ -190,10 +239,138 @@ export function MusicApp() {
   }, [library?.tracks, search]);
 
   function haptic(kind: "selection" | "success" | "error" = "selection") {
-    const feedback = window.Telegram?.WebApp.HapticFeedback;
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp?.isVersionAtLeast("6.1")) return;
+    const feedback = webApp.HapticFeedback;
     if (kind === "selection") feedback?.selectionChanged();
     else feedback?.notificationOccurred(kind);
   }
+
+  const activateTrack = useCallback((track: Track, autoplay = true) => {
+    const audio = audioRef.current;
+    if (!audio || !track.streamUrl) return;
+    if (audio.getAttribute("src") !== track.streamUrl) {
+      audio.src = track.streamUrl;
+      audio.load();
+    }
+    setCurrentTime(0);
+    setMediaDuration(track.duration);
+    if (autoplay) {
+      void audio.play().catch(() => {
+        setIsPlaying(false);
+        setToast({ kind: "error", message: "Tap play once more to start audio." });
+      });
+    }
+  }, []);
+
+  const playAt = useCallback((tracks: Track[], index: number) => {
+    if (!tracks.length) return;
+    const safeIndex = ((index % tracks.length) + tracks.length) % tracks.length;
+    setQueue(tracks);
+    setQueueIndex(safeIndex);
+    activateTrack(tracks[safeIndex]);
+  }, [activateTrack]);
+
+  const startInAppQueue = useCallback((tracks: Track[], shuffle = false, startIndex = 0) => {
+    if (!tracks.length) return;
+    const selected = tracks[startIndex] ?? tracks[0];
+    if (!selected.playable || !selected.streamUrl) {
+      setToast({
+        kind: "error",
+        message: "Demo tracks are visual placeholders. Send music to your bot to play it.",
+      });
+      return;
+    }
+    const playable = tracks.filter((track) => track.playable && track.streamUrl);
+    if (!playable.length) return;
+    const nextQueue = shuffle
+      ? randomized(playable)
+      : playable;
+    const nextIndex = shuffle
+      ? 0
+      : Math.max(0, nextQueue.findIndex((track) => track.id === selected.id));
+    setShuffleEnabled(shuffle);
+    haptic();
+    playAt(nextQueue, nextIndex);
+  }, [playAt]);
+
+  const advanceTrack = useCallback((direction: 1 | -1) => {
+    if (!queue.length) return;
+    const nextIndex = (queueIndex + direction + queue.length) % queue.length;
+    setQueueIndex(nextIndex);
+    activateTrack(queue[nextIndex]);
+    haptic();
+  }, [activateTrack, queue, queueIndex]);
+
+  const previousTrack = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio && audio.currentTime > 3) {
+      audio.currentTime = 0;
+      setCurrentTime(0);
+      return;
+    }
+    advanceTrack(-1);
+  }, [advanceTrack]);
+
+  const togglePlayback = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio || !currentTrack) return;
+    if (audio.paused) {
+      void audio.play().catch(() => setToast({ kind: "error", message: "Audio could not start." }));
+    } else {
+      audio.pause();
+    }
+    haptic();
+  }, [currentTrack]);
+
+  const seekTo = useCallback((seconds: number) => {
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(seconds)) return;
+    audio.currentTime = seconds;
+    setCurrentTime(seconds);
+  }, []);
+
+  const toggleShuffle = useCallback(() => {
+    if (!currentTrack || !queue.length) return;
+    if (!shuffleEnabled) {
+      const rest = randomized(queue.filter((track) => track.id !== currentTrack.id));
+      setQueue([currentTrack, ...rest]);
+      setQueueIndex(0);
+      setShuffleEnabled(true);
+    } else {
+      setShuffleEnabled(false);
+    }
+    haptic();
+  }, [currentTrack, queue, shuffleEnabled]);
+
+  useEffect(() => {
+    if (!currentTrack || !("mediaSession" in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: "tune · Telegram library",
+      artwork: currentTrack.artworkUrl
+        ? [{ src: new URL(currentTrack.artworkUrl, window.location.origin).href, sizes: "320x320", type: "image/jpeg" }]
+        : [],
+    });
+    const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+      ["play", () => void audioRef.current?.play()],
+      ["pause", () => audioRef.current?.pause()],
+      ["nexttrack", () => advanceTrack(1)],
+      ["previoustrack", previousTrack],
+      ["seekto", (details) => details.seekTime !== undefined && seekTo(details.seekTime)],
+      ["seekforward", (details) => seekTo((audioRef.current?.currentTime ?? 0) + (details.seekOffset ?? 10))],
+      ["seekbackward", (details) => seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - (details.seekOffset ?? 10)))],
+    ];
+    for (const [action, handler] of handlers) {
+      try { navigator.mediaSession.setActionHandler(action, handler); } catch { /* unsupported action */ }
+    }
+    return () => {
+      for (const [action] of handlers) {
+        try { navigator.mediaSession.setActionHandler(action, null); } catch { /* unsupported action */ }
+      }
+    };
+  }, [advanceTrack, currentTrack, previousTrack, seekTo]);
 
   async function sendQueue(trackIds: string[], shuffle = false) {
     if (!trackIds.length || sending) return;
@@ -298,17 +475,59 @@ export function MusicApp() {
   }
 
   return (
-    <div className="app-frame">
+    <div className={`app-frame ${currentTrack ? "has-player" : ""}`}>
+      <audio
+        ref={audioRef}
+        preload="metadata"
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onLoadedMetadata={(event) => {
+          const duration = Number.isFinite(event.currentTarget.duration)
+            ? event.currentTarget.duration
+            : currentTrack?.duration ?? 0;
+          setMediaDuration(duration);
+        }}
+        onTimeUpdate={(event) => {
+          const audio = event.currentTarget;
+          setCurrentTime(audio.currentTime);
+          if ("mediaSession" in navigator && Number.isFinite(audio.duration) && audio.duration > 0) {
+            try {
+              navigator.mediaSession.setPositionState({
+                duration: audio.duration,
+                playbackRate: audio.playbackRate,
+                position: Math.min(audio.currentTime, audio.duration),
+              });
+            } catch { /* media position state is best-effort */ }
+          }
+        }}
+        onEnded={() => {
+          if (repeatOne && audioRef.current) {
+            audioRef.current.currentTime = 0;
+            void audioRef.current.play();
+          } else {
+            advanceTrack(1);
+          }
+        }}
+        onError={() => {
+          if (!audioRef.current?.getAttribute("src")) return;
+          setIsPlaying(false);
+          setToast({ kind: "error", message: "This track could not be streamed from Telegram." });
+        }}
+      />
       {!library ? <Skeleton /> : (
         <>
           {tab === "home" ? (
             <HomeScreen
               library={library}
-              onPlay={(track) => void sendQueue([track.id])}
+              onPlay={(track) => startInAppQueue(
+                library.tracks,
+                false,
+                library.tracks.findIndex((item) => item.id === track.id),
+              )}
               onMore={setTrackMenu}
               onPlaylist={(id) => { setSelectedPlaylistId(id); setTab("playlists"); }}
               onSeeLibrary={() => switchTab("library")}
-              onShuffle={() => void sendQueue(library.tracks.map((track) => track.id), true)}
+              onShuffle={() => startInAppQueue(library.tracks, true)}
               sending={sending}
             />
           ) : null}
@@ -318,9 +537,13 @@ export function MusicApp() {
               total={library.tracks.length}
               search={search}
               setSearch={setSearch}
-              onPlay={(track) => void sendQueue([track.id])}
+              onPlay={(track) => startInAppQueue(
+                filteredTracks,
+                false,
+                filteredTracks.findIndex((item) => item.id === track.id),
+              )}
               onMore={setTrackMenu}
-              onShuffle={() => void sendQueue(library.tracks.map((track) => track.id), true)}
+              onShuffle={() => startInAppQueue(library.tracks, true)}
               sending={sending}
             />
           ) : null}
@@ -335,15 +558,28 @@ export function MusicApp() {
             <PlaylistDetail
               playlist={selectedPlaylist}
               onBack={() => setSelectedPlaylistId(null)}
-              onPlay={() => void sendQueue(selectedPlaylist.tracks.map((track) => track.id))}
-              onShuffle={() => void sendQueue(selectedPlaylist.tracks.map((track) => track.id), true)}
-              onTrackPlay={(track) => void sendQueue([track.id])}
+              onPlay={() => startInAppQueue(selectedPlaylist.tracks)}
+              onShuffle={() => startInAppQueue(selectedPlaylist.tracks, true)}
+              onTrackPlay={(track) => startInAppQueue(
+                selectedPlaylist.tracks,
+                false,
+                selectedPlaylist.tracks.findIndex((item) => item.id === track.id),
+              )}
               onMore={setTrackMenu}
               sending={sending}
             />
           ) : null}
 
           <BottomNav tab={tab} onSelect={switchTab} />
+          {currentTrack ? (
+            <MiniPlayer
+              track={currentTrack}
+              isPlaying={isPlaying}
+              progress={mediaDuration ? currentTime / mediaDuration : 0}
+              onOpen={() => setPlayerOpen(true)}
+              onToggle={togglePlayback}
+            />
+          ) : null}
         </>
       )}
 
@@ -361,10 +597,33 @@ export function MusicApp() {
           currentPlaylist={selectedPlaylist}
           busy={mutating || sending}
           onClose={() => setTrackMenu(null)}
-          onPlay={() => { setTrackMenu(null); void sendQueue([trackMenu.id]); }}
+          onPlayNow={() => {
+            setTrackMenu(null);
+            startInAppQueue([trackMenu]);
+          }}
+          onSendTelegram={() => { setTrackMenu(null); void sendQueue([trackMenu.id]); }}
           onAdd={addToPlaylist}
           onRemove={selectedPlaylist ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id) : undefined}
           onNewPlaylist={() => { setTrackMenu(null); setCreateOpen(true); }}
+        />
+      ) : null}
+      {playerOpen && currentTrack ? (
+        <NowPlaying
+          track={currentTrack}
+          queuePosition={queueIndex + 1}
+          queueLength={queue.length}
+          currentTime={currentTime}
+          duration={mediaDuration || currentTrack.duration}
+          isPlaying={isPlaying}
+          shuffleEnabled={shuffleEnabled}
+          repeatOne={repeatOne}
+          onClose={() => setPlayerOpen(false)}
+          onToggle={togglePlayback}
+          onPrevious={previousTrack}
+          onNext={() => advanceTrack(1)}
+          onSeek={seekTo}
+          onShuffle={toggleShuffle}
+          onRepeat={() => { setRepeatOne((value) => !value); haptic(); }}
         />
       ) : null}
       {sending ? (
@@ -456,7 +715,7 @@ function HomeScreen({
 
       <div className="telegram-note">
         <span><Send /></span>
-        <div><strong>Plays in Telegram</strong><p>Your audio stays on Telegram. We only organize file references.</p></div>
+        <div><strong>Streamed from Telegram</strong><p>Your audio stays on Telegram. Tune streams it only while you listen.</p></div>
       </div>
     </main>
   );
@@ -575,6 +834,113 @@ function PlaylistDetail({
   );
 }
 
+function MiniPlayer({
+  track,
+  isPlaying,
+  progress,
+  onOpen,
+  onToggle,
+}: {
+  track: Track;
+  isPlaying: boolean;
+  progress: number;
+  onOpen: () => void;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="mini-player">
+      <button className="mini-player-main" onClick={onOpen} aria-label={`Open player for ${track.title}`}>
+        <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />
+        <span><strong>{track.title}</strong><small>{track.artist}</small></span>
+      </button>
+      <button className="mini-play-button" onClick={onToggle} aria-label={isPlaying ? "Pause" : "Play"}>
+        {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
+      </button>
+      <span className="mini-progress"><i style={{ width: `${Math.min(100, Math.max(0, progress * 100))}%` }} /></span>
+    </div>
+  );
+}
+
+function NowPlaying({
+  track,
+  queuePosition,
+  queueLength,
+  currentTime,
+  duration,
+  isPlaying,
+  shuffleEnabled,
+  repeatOne,
+  onClose,
+  onToggle,
+  onPrevious,
+  onNext,
+  onSeek,
+  onShuffle,
+  onRepeat,
+}: {
+  track: Track;
+  queuePosition: number;
+  queueLength: number;
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+  shuffleEnabled: boolean;
+  repeatOne: boolean;
+  onClose: () => void;
+  onToggle: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
+  onSeek: (seconds: number) => void;
+  onShuffle: () => void;
+  onRepeat: () => void;
+}) {
+  const safeDuration = Math.max(duration || 0, 0);
+  return (
+    <section className={`now-playing cover-${track.artworkSeed % 8}`} role="dialog" aria-modal="true" aria-label="Now playing">
+      <div className="now-playing-wash" />
+      <header className="player-header">
+        <button onClick={onClose} aria-label="Minimize player"><ChevronDown /></button>
+        <div><span>Now playing</span><strong>From your Telegram library</strong></div>
+        <span className="queue-count">{queuePosition}/{queueLength}</span>
+      </header>
+      <div className="player-content">
+        <div className="hero-cover-wrap">
+          <Cover seed={track.artworkSeed} size="hero" label={track.title} artworkUrl={track.artworkUrl} />
+          <span className="artwork-source">{track.artworkUrl ? "Telegram album artwork" : "tune artwork"}</span>
+        </div>
+        <div className="now-playing-copy">
+          <p className="eyebrow">Playing now</p>
+          <h1>{track.title}</h1>
+          <p>{track.artist}</p>
+        </div>
+        <div className="player-timeline">
+          <input
+            aria-label="Seek"
+            type="range"
+            min="0"
+            max={safeDuration || 1}
+            step="0.1"
+            value={Math.min(currentTime, safeDuration || 1)}
+            onChange={(event) => onSeek(Number(event.target.value))}
+            style={{ "--progress": `${safeDuration ? (currentTime / safeDuration) * 100 : 0}%` } as React.CSSProperties}
+          />
+          <div><span>{formatPlaybackTime(currentTime)}</span><span>-{formatPlaybackTime(Math.max(0, safeDuration - currentTime))}</span></div>
+        </div>
+        <div className="player-controls">
+          <button className={shuffleEnabled ? "active" : ""} onClick={onShuffle} aria-label="Shuffle"><Shuffle /></button>
+          <button onClick={onPrevious} aria-label="Previous track"><SkipBack fill="currentColor" /></button>
+          <button className="player-main-control" onClick={onToggle} aria-label={isPlaying ? "Pause" : "Play"}>
+            {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
+          </button>
+          <button onClick={onNext} aria-label="Next track"><SkipForward fill="currentColor" /></button>
+          <button className={repeatOne ? "active" : ""} onClick={onRepeat} aria-label="Repeat track"><Repeat2 /></button>
+        </div>
+        <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
+      </div>
+    </section>
+  );
+}
+
 function BottomNav({ tab, onSelect }: { tab: Tab; onSelect: (tab: Tab) => void }) {
   const items: Array<{ id: Tab; label: string; Icon: typeof House }> = [
     { id: "home", label: "Home", Icon: House },
@@ -628,7 +994,8 @@ function TrackSheet({
   currentPlaylist,
   busy,
   onClose,
-  onPlay,
+  onPlayNow,
+  onSendTelegram,
   onAdd,
   onRemove,
   onNewPlaylist,
@@ -638,7 +1005,8 @@ function TrackSheet({
   currentPlaylist: Playlist | null;
   busy: boolean;
   onClose: () => void;
-  onPlay: () => void;
+  onPlayNow: () => void;
+  onSendTelegram: () => void;
   onAdd: (playlistId: string, trackId: string) => void;
   onRemove?: () => void;
   onNewPlaylist: () => void;
@@ -646,11 +1014,12 @@ function TrackSheet({
   return (
     <Sheet onClose={onClose} title={`Options for ${track.title}`}>
       <div className="sheet-track">
-        <Cover seed={track.artworkSeed} size="medium" label={track.title} />
+        <Cover seed={track.artworkSeed} size="medium" label={track.title} artworkUrl={track.artworkUrl} />
         <div><h2>{track.title}</h2><p>{track.artist}</p></div>
         <button className="icon-button" onClick={onClose}><X /></button>
       </div>
-      <button className="sheet-action" onClick={onPlay} disabled={busy}><span><Send /></span><div><strong>Play in Telegram</strong><small>Send this track to the native player</small></div><ChevronRight /></button>
+      <button className="sheet-action play-now-action" onClick={onPlayNow} disabled={busy || !track.playable}><span><Play fill="currentColor" /></span><div><strong>Play now</strong><small>Listen here with full controls</small></div><ChevronRight /></button>
+      <button className="sheet-action" onClick={onSendTelegram} disabled={busy}><span><Send /></span><div><strong>Send to Telegram player</strong><small>Play it as an audio message in chat</small></div><ChevronRight /></button>
       {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from {currentPlaylist?.name}</strong><small>The song stays in your library</small></div><ChevronRight /></button> : null}
       <div className="sheet-divider" />
       <div className="sheet-subheading"><span>Add to playlist</span><button onClick={onNewPlaylist}><Plus /> New</button></div>

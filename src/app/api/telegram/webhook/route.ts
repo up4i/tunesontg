@@ -13,6 +13,15 @@ type TelegramAudio = {
   file_name?: string;
   mime_type?: string;
   file_size?: number;
+  thumbnail?: TelegramPhotoSize;
+};
+
+type TelegramPhotoSize = {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
 };
 
 type TelegramDocument = {
@@ -21,6 +30,7 @@ type TelegramDocument = {
   file_name?: string;
   mime_type?: string;
   file_size?: number;
+  thumbnail?: TelegramPhotoSize;
 };
 
 type TelegramMessage = {
@@ -38,6 +48,30 @@ function titleFromFilename(filename?: string): string {
   return filename?.replace(/\.[^.]+$/, "").trim() || "Untitled track";
 }
 
+function isAudioDocument(document?: TelegramDocument): document is TelegramDocument {
+  return Boolean(
+    document
+    && (
+      document.mime_type?.startsWith("audio/")
+      || /\.(mp3|m4a|aac|flac|wav|ogg|opus)$/i.test(document.file_name ?? "")
+    ),
+  );
+}
+
+function audioMimeType(document: TelegramDocument): string | undefined {
+  if (document.mime_type?.startsWith("audio/")) return document.mime_type;
+  const extension = document.file_name?.split(".").pop()?.toLowerCase();
+  return ({
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    aac: "audio/aac",
+    flac: "audio/flac",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    opus: "audio/ogg",
+  } as Record<string, string>)[extension ?? ""];
+}
+
 function incomingTrack(message: TelegramMessage): IncomingTrack | null {
   if (message.audio) {
     return {
@@ -50,10 +84,12 @@ function incomingTrack(message: TelegramMessage): IncomingTrack | null {
       duration: message.audio.duration || 0,
       mimeType: message.audio.mime_type,
       fileSize: message.audio.file_size,
+      thumbnailFileId: message.audio.thumbnail?.file_id,
+      thumbnailUniqueId: message.audio.thumbnail?.file_unique_id,
     };
   }
 
-  if (message.document?.mime_type?.startsWith("audio/")) {
+  if (isAudioDocument(message.document)) {
     return {
       fileId: message.document.file_id,
       fileUniqueId: message.document.file_unique_id,
@@ -62,8 +98,10 @@ function incomingTrack(message: TelegramMessage): IncomingTrack | null {
       title: titleFromFilename(message.document.file_name),
       artist: "Unknown artist",
       duration: 0,
-      mimeType: message.document.mime_type,
+      mimeType: audioMimeType(message.document),
       fileSize: message.document.file_size,
+      thumbnailFileId: message.document.thumbnail?.file_id,
+      thumbnailUniqueId: message.document.thumbnail?.file_unique_id,
     };
   }
 
@@ -73,7 +111,7 @@ function incomingTrack(message: TelegramMessage): IncomingTrack | null {
 async function sendWelcome(chatId: number, firstName: string): Promise<void> {
   await callTelegram("sendMessage", {
     chat_id: chatId,
-    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me an audio file and I’ll add it to your library. Open the app to build playlists, shuffle a queue, and send it back to Telegram’s player.`,
+    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me an audio file and I’ll add it to your library. Open the app to build playlists and play your music without leaving Telegram.`,
     reply_markup: {
       inline_keyboard: [[{ text: "Open my library", web_app: { url: appUrl() } }]],
     },

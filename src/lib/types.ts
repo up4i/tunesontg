@@ -7,6 +7,10 @@ export type Track = {
   fileSize: number | null;
   addedAt: string;
   artworkSeed: number;
+  hasArtwork: boolean;
+  playable: boolean;
+  streamUrl?: string;
+  artworkUrl?: string;
 };
 
 export type Playlist = {

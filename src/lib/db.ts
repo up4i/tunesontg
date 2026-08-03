@@ -19,6 +19,8 @@ type TrackRow = {
   added_at: string;
   telegram_file_id: string;
   telegram_file_unique_id: string;
+  thumbnail_file_id: string | null;
+  thumbnail_unique_id: string | null;
 };
 
 type PlaylistRow = {
@@ -63,6 +65,8 @@ function database(): Database.Database {
       duration INTEGER NOT NULL DEFAULT 0,
       mime_type TEXT,
       file_size INTEGER,
+      thumbnail_file_id TEXT,
+      thumbnail_unique_id TEXT,
       added_at TEXT NOT NULL,
       UNIQUE(owner_id, telegram_file_unique_id)
     );
@@ -92,6 +96,14 @@ function database(): Database.Database {
       ON playlist_tracks(playlist_id, position);
   `);
 
+  const trackColumns = db.pragma("table_info(tracks)") as Array<{ name: string }>;
+  if (!trackColumns.some((column) => column.name === "thumbnail_file_id")) {
+    db.exec("ALTER TABLE tracks ADD COLUMN thumbnail_file_id TEXT");
+  }
+  if (!trackColumns.some((column) => column.name === "thumbnail_unique_id")) {
+    db.exec("ALTER TABLE tracks ADD COLUMN thumbnail_unique_id TEXT");
+  }
+
   global.__tunesDb = db;
   return db;
 }
@@ -119,6 +131,8 @@ function toTrack(row: TrackRow): Track {
     fileSize: row.file_size,
     addedAt: row.added_at,
     artworkSeed: artworkSeed(row.telegram_file_unique_id),
+    hasArtwork: Boolean(row.thumbnail_file_id),
+    playable: !row.telegram_file_id.startsWith("demo:"),
   };
 }
 
@@ -149,6 +163,8 @@ export type IncomingTrack = {
   duration: number;
   mimeType?: string;
   fileSize?: number;
+  thumbnailFileId?: string;
+  thumbnailUniqueId?: string;
 };
 
 export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
@@ -158,19 +174,22 @@ export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
     INSERT INTO tracks (
       id, owner_id, telegram_file_id, telegram_file_unique_id,
       source_chat_id, source_message_id, title, artist, duration,
-      mime_type, file_size, added_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      mime_type, file_size, thumbnail_file_id, thumbnail_unique_id, added_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(owner_id, telegram_file_unique_id) DO UPDATE SET
       telegram_file_id = excluded.telegram_file_id,
       title = excluded.title,
       artist = excluded.artist,
       duration = excluded.duration,
       mime_type = excluded.mime_type,
-      file_size = excluded.file_size
+      file_size = excluded.file_size,
+      thumbnail_file_id = COALESCE(excluded.thumbnail_file_id, tracks.thumbnail_file_id),
+      thumbnail_unique_id = COALESCE(excluded.thumbnail_unique_id, tracks.thumbnail_unique_id)
   `).run(
     randomUUID(), owner.id, track.fileId, track.fileUniqueId,
     String(track.sourceChatId), track.sourceMessageId, track.title, track.artist,
-    track.duration, track.mimeType ?? null, track.fileSize ?? null, now(),
+    track.duration, track.mimeType ?? null, track.fileSize ?? null,
+    track.thumbnailFileId ?? null, track.thumbnailUniqueId ?? null, now(),
   );
 
   const row = db.prepare(`
@@ -328,6 +347,40 @@ export type TelegramTrack = {
   artist: string;
   duration: number;
 };
+
+export type PlaybackFile = {
+  telegramFileId: string;
+  thumbnailFileId: string | null;
+  mimeType: string | null;
+  fileSize: number | null;
+  title: string;
+  artist: string;
+};
+
+export function getPlaybackFile(telegramId: string, trackId: string): PlaybackFile | null {
+  const row = database().prepare(`
+    SELECT t.telegram_file_id, t.thumbnail_file_id, t.mime_type, t.file_size,
+      t.title, t.artist
+    FROM tracks t
+    JOIN users u ON u.id = t.owner_id
+    WHERE u.telegram_id = ? AND t.id = ?
+  `).get(telegramId, trackId) as {
+    telegram_file_id: string;
+    thumbnail_file_id: string | null;
+    mime_type: string | null;
+    file_size: number | null;
+    title: string;
+    artist: string;
+  } | undefined;
+  return row ? {
+    telegramFileId: row.telegram_file_id,
+    thumbnailFileId: row.thumbnail_file_id,
+    mimeType: row.mime_type,
+    fileSize: row.file_size,
+    title: row.title,
+    artist: row.artist,
+  } : null;
+}
 
 export function getOwnedTracks(user: TelegramUser, trackIds: string[]): TelegramTrack[] {
   if (!trackIds.length) return [];

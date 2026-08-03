@@ -34,3 +34,9 @@ export function botChatUrl(): string | null {
   const username = process.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "");
   return username ? `https://t.me/${username}` : null;
 }
+
+export function telegramFileUrl(filePath: string): string {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new TelegramApiError("TELEGRAM_BOT_TOKEN is not configured.");
+  return `https://api.telegram.org/file/bot${token}/${filePath.replace(/^\//, "")}`;
+}

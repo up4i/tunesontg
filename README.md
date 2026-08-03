@@ -1,6 +1,6 @@
 # tune — music on Telegram
 
-`tune` is a Telegram bot plus Mini App for turning audio messages into a personal music library. A user sends or forwards music to the bot, organizes it in the Mini App, then sends a track, playlist, or shuffled queue back to Telegram's native audio player.
+`tune` is a Telegram bot plus Mini App for turning audio messages into a personal music library. A user sends or forwards music to the bot, organizes it in the Mini App, and listens through a full in-app player without permanently copying the audio from Telegram.
 
 The project is intentionally one small Next.js service. It owns the UI, Telegram webhook, signed Mini App authentication, SQLite database, and Bot API calls.
 
@@ -11,22 +11,29 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Per-user libraries validated from signed Telegram Mini App `initData`
 - Searchable, responsive music UI with Telegram theme/safe-area support
 - Playlist creation, add/remove tracks, play, and shuffle
-- Native playback handoff through `sendAudio` / `sendMediaGroup`
+- Full now-playing UI with pause, seek, previous/next, repeat, and queue state
+- Telegram album-cover thumbnails when the incoming audio includes one
+- Stateless, Range-aware Telegram streaming for seeking without audio storage
+- Device/OS playback controls through the browser Media Session API where supported
+- Optional native Telegram playback handoff through `sendAudio` / `sendMediaGroup`
 - Local demo library for designing and testing without a bot token
 - Webhook secret validation and user-scoped database queries
 
-## The Telegram player boundary
+## Playback architecture
 
 Telegram does not expose its native audio player as a Mini App JavaScript API. A Mini App cannot start/pause Telegram's player, inspect its progress, or pass a `file_id` directly to it.
 
-This app takes the server-light approach:
+The default experience is therefore a Mini App web-audio player:
 
 1. The bot records a Telegram `file_id`; it never downloads the music.
-2. The Mini App creates and optionally shuffles a queue.
-3. The backend sends the selected audio back to that user's bot chat using the stored `file_id`s.
-4. Telegram renders those audio messages and plays them in its integrated player. The user taps play there.
+2. The authenticated library response issues a short-lived, user-and-track-scoped media ticket.
+3. The browser requests audio through that signed URL. The backend calls Telegram `getFile` and streams the response without saving it.
+4. Byte-range requests are forwarded for seeking. The browser owns play/pause, queue, shuffle, repeat, and progress state.
+5. Telegram's direct file URL—and therefore the bot token—never reaches client code.
 
-That means the backend serves API traffic but not audio bytes. A true player inside the Mini App would require a protected streaming proxy (the direct Telegram file URL contains the bot token and must never reach the browser), plus server bandwidth and separate playback state.
+This avoids permanent audio storage, but playback consumes server bandwidth. Telegram's hosted Bot API currently limits `getFile` downloads to 20 MB. Larger tracks need a local Telegram Bot API server or a separate storage/CDN decision.
+
+The track menu retains **Send to Telegram player** as a low-bandwidth fallback. That copies the audio message into the bot chat for playback in Telegram's native player, but native playback cannot be controlled from the Mini App.
 
 ## Run locally
 
@@ -64,6 +71,7 @@ TELEGRAM_BOT_TOKEN=123456:replace_me
 TELEGRAM_BOT_USERNAME=my_tune_bot
 NEXT_PUBLIC_APP_URL=https://music.example.com
 TELEGRAM_WEBHOOK_SECRET=use_a_long_random_value
+PLAYBACK_SIGNING_SECRET=use_another_long_random_value
 DATABASE_PATH=./data/tunes.db
 ```
 
@@ -74,7 +82,7 @@ npm run telegram:set-webhook
 ```
 
 5. In BotFather, optionally configure the same URL as the bot's Main Mini App under **Bot Settings → Configure Mini App**.
-6. Send the bot an MP3/M4A audio message, open **My music**, and test the handoff.
+6. Send the bot an MP3/M4A audio message, open **My music**, and tap the track to stream it.
 
 Keep `TELEGRAM_BOT_TOKEN` server-only. Never prefix it with `NEXT_PUBLIC_` or place Telegram file download URLs in client code.
 
@@ -96,9 +104,12 @@ Use one running app instance while SQLite is the database. Mount `/app/data` on 
 src/app/                         Mini App and API route handlers
 src/app/api/telegram/webhook/    Telegram update ingestion
 src/app/api/play/                Native-player queue handoff
+src/app/api/tracks/              Signed audio and artwork streaming
 src/components/music-app.tsx     Mobile music product interface
 src/lib/auth.ts                  Telegram initData HMAC validation
 src/lib/db.ts                    SQLite schema and user-scoped data access
+src/lib/playback-ticket.ts       Expiring media URL signatures
+src/lib/telegram-media.ts        Range-aware stateless media proxy
 src/lib/telegram.ts              Minimal server-only Bot API client
 scripts/set-webhook.ts           Bot webhook/menu bootstrap
 ```
@@ -111,6 +122,6 @@ scripts/set-webhook.ts           Bot webhook/menu bootstrap
 - Postgres migration before horizontal scaling
 - Inline mode for sharing a saved track into another chat
 - Admin moderation, abuse controls, quotas, and a privacy policy before a public launch
-- Optional in-app streaming mode only after making a deliberate bandwidth/storage decision
+- Optional short-lived edge caching after measuring streaming bandwidth
 
 Users should only save and share audio they have the right to use. For a public launch, document retention and deletion behavior even though this app stores only Telegram file references.

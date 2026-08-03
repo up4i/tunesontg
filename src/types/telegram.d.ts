@@ -5,11 +5,13 @@ declare global {
     Telegram?: {
       WebApp: {
         initData: string;
+        version: string;
         colorScheme: "light" | "dark";
         ready(): void;
         expand(): void;
         close(): void;
         openTelegramLink(url: string): void;
+        isVersionAtLeast(version: string): boolean;
         setHeaderColor(color: string): void;
         setBackgroundColor(color: string): void;
         HapticFeedback?: {
