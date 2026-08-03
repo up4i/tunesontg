@@ -1,0 +1,40 @@
+{
+  "name": "tunes-on-tg",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
+    "telegram:set-webhook": "tsx --env-file=.env.local scripts/set-webhook.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.2",
+    "lucide-react": "1.28.0",
+    "next": "16.2.12",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "^22.19.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.0",
+    "eslint-config-next": "16.2.12",
+    "tsx": "^4.20.6",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3"
+  },
+  "allowScripts": {
+    "better-sqlite3@13.0.2": true,
+    "esbuild@0.28.1": true,
+    "unrs-resolver@1.12.2": true
+  }
+}
