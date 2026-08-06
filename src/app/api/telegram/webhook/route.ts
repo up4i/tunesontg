@@ -1,4 +1,4 @@
-import { saveTrack, upsertUser, type IncomingTrack } from "@/lib/db";
+import { saveTrackWithStatus, upsertUser, type IncomingTrack } from "@/lib/db";
 import { appUrl, callTelegram } from "@/lib/telegram";
 import type { TelegramUser } from "@/lib/types";
 
@@ -149,10 +149,12 @@ export async function POST(request: Request): Promise<Response> {
 
     const trackInput = incomingTrack(message);
     if (trackInput) {
-      const track = saveTrack(message.from, trackInput);
+      const { track, created } = saveTrackWithStatus(message.from, trackInput);
       await callTelegram("sendMessage", {
         chat_id: message.chat.id,
-        text: `Saved “${track.title}” by ${track.artist} to your library.`,
+        text: created
+          ? `Saved “${track.title}” by ${track.artist} to your library.`
+          : `“${track.title}” by ${track.artist} is already in your library. I didn’t add a duplicate.`,
         reply_to_message_id: message.message_id,
         reply_markup: {
           inline_keyboard: [[{ text: "View in library", web_app: { url: appUrl() } }]],

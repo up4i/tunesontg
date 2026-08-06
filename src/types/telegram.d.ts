@@ -11,6 +11,8 @@ declare global {
         expand(): void;
         close(): void;
         openTelegramLink(url: string): void;
+        onEvent(eventType: "themeChanged", callback: () => void): void;
+        offEvent(eventType: "themeChanged", callback: () => void): void;
         isVersionAtLeast(version: string): boolean;
         setHeaderColor(color: string): void;
         setBackgroundColor(color: string): void;

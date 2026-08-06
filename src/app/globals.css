@@ -10,7 +10,24 @@
   --lime-soft: rgba(214, 255, 87, 0.14);
   --orange: #ff754a;
   --nav-height: 82px;
+  --body-bg: #090908;
+  --body-glow: rgba(214, 255, 87, 0.09);
   color-scheme: dark;
+}
+
+html[data-theme="light"] {
+  --ink: #1e1e1a;
+  --muted: #66665f;
+  --subtle: #85857c;
+  --canvas: #f8f6ef;
+  --panel: #efede5;
+  --panel-2: #e5e2d8;
+  --line: rgba(25, 25, 21, 0.11);
+  --lime: #668900;
+  --lime-soft: rgba(102, 137, 0, 0.12);
+  --body-bg: #e9e6dd;
+  --body-glow: rgba(117, 151, 19, 0.12);
+  color-scheme: light;
 }
 
 * {
@@ -25,8 +42,8 @@ body {
 
 body {
   background:
-    radial-gradient(circle at 20% -10%, rgba(214, 255, 87, 0.09), transparent 28rem),
-    #090908;
+    radial-gradient(circle at 20% -10%, var(--body-glow), transparent 28rem),
+    var(--body-bg);
   color: var(--ink);
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -107,6 +124,30 @@ button:disabled {
   margin: 5px 0 0;
 }
 
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+}
+
+.theme-toggle {
+  align-items: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  display: flex;
+  height: 36px;
+  justify-content: center;
+  padding: 0;
+  width: 36px;
+}
+
+.theme-toggle svg {
+  height: 15px;
+  width: 15px;
+}
+
 .avatar {
   align-items: center;
   background: linear-gradient(145deg, #7461ff, #ff8760);
@@ -118,7 +159,16 @@ button:disabled {
   font-weight: 800;
   height: 40px;
   justify-content: center;
+  overflow: hidden;
   width: 40px;
+}
+
+.avatar-image {
+  background-position: center;
+  background-size: cover;
+  display: block;
+  height: 100%;
+  width: 100%;
 }
 
 .eyebrow {
@@ -168,7 +218,7 @@ button:disabled {
   border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 23px;
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.24);
-  color: var(--ink);
+  color: #f5f2e9;
   display: block;
   height: 204px;
   overflow: hidden;
@@ -581,6 +631,7 @@ button:disabled {
 }
 
 .telegram-note strong {
+  color: #f5f2e9;
   font-size: 11px;
   margin-bottom: 3px;
 }
@@ -620,7 +671,7 @@ button:disabled {
 .search-box {
   align-items: center;
   background: var(--panel-2);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--line);
   border-radius: 13px;
   display: flex;
   height: 46px;
@@ -650,7 +701,7 @@ button:disabled {
 
 .search-box button {
   align-items: center;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--panel);
   border-radius: 50%;
   color: var(--muted);
   display: flex;
@@ -727,7 +778,7 @@ button:disabled {
   align-items: center;
   aspect-ratio: 1 / 1.23;
   background: transparent;
-  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border: 1px dashed var(--line);
   border-radius: 15px;
   color: var(--muted);
   display: flex;
@@ -890,8 +941,32 @@ button:disabled {
 .playlist-actions {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 13px;
+  justify-content: center;
   margin-top: 20px;
+}
+
+.playlist-add-music {
+  background: var(--lime-soft);
+  color: var(--lime);
+}
+
+.playlist-delete {
+  align-items: center;
+  background: rgba(255, 92, 92, 0.1);
+  border-radius: 50%;
+  color: #ff8787;
+  display: flex;
+  height: 44px;
+  justify-content: center;
+  padding: 0;
+  width: 44px;
+}
+
+.playlist-delete svg {
+  height: 16px;
+  width: 16px;
 }
 
 .play-button {
@@ -933,6 +1008,18 @@ button:disabled {
   z-index: 20;
 }
 
+html[data-theme="light"] .bottom-nav {
+  background: linear-gradient(to top, rgba(248, 246, 239, 0.99) 60%, rgba(248, 246, 239, 0.9));
+}
+
+html[data-theme="light"] .bottom-nav button {
+  color: #87877f;
+}
+
+html[data-theme="light"] .bottom-nav button.active {
+  color: var(--lime);
+}
+
 .bottom-nav button {
   align-items: center;
   background: transparent;
@@ -956,6 +1043,10 @@ button:disabled {
 }
 
 .mini-player {
+  --canvas: #11110f;
+  --ink: #f5f2e9;
+  --lime: #d6ff57;
+  --muted: #96968e;
   align-items: center;
   backdrop-filter: blur(22px);
   background: rgba(38, 38, 34, 0.96);
@@ -973,6 +1064,7 @@ button:disabled {
   transform: translateX(-50%);
   width: calc(100% - 24px);
   z-index: 24;
+  color: var(--ink);
 }
 
 .mini-player-main {
@@ -1046,17 +1138,43 @@ button:disabled {
 }
 
 .now-playing {
+  --canvas: #11110f;
+  --ink: #f5f2e9;
+  --lime: #d6ff57;
+  --lime-soft: rgba(214, 255, 87, 0.14);
+  --muted: #96968e;
+  --subtle: #6e6e67;
   background: #171714;
-  bottom: 0;
+  color: var(--ink);
+  height: 100dvh;
   left: 50%;
+  max-height: 100dvh;
   max-width: 500px;
-  overflow: hidden auto;
+  opacity: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: max(18px, env(safe-area-inset-top)) 24px max(25px, env(safe-area-inset-bottom));
+  pointer-events: none;
   position: fixed;
   top: 0;
-  transform: translateX(-50%);
+  transform: translate(-50%, 100%);
+  transition:
+    transform 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    visibility 0s linear 320ms;
+  visibility: hidden;
+  will-change: transform, opacity;
   width: 100%;
   z-index: 70;
+}
+
+.now-playing-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+  transition-delay: 0s;
+  visibility: visible;
 }
 
 .now-playing.cover-0 { background: #3a3447; }
@@ -1146,6 +1264,7 @@ button:disabled {
   align-items: center;
   display: flex;
   flex-direction: column;
+  width: 100%;
 }
 
 .hero-cover-wrap {
@@ -1279,13 +1398,23 @@ button:disabled {
   width: 23px !important;
 }
 
+.player-utility-row {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+  min-height: 38px;
+  position: relative;
+  width: 100%;
+}
+
 .streaming-badge {
   align-items: center;
   color: rgba(255, 255, 255, 0.35);
   display: flex;
   font-size: 8px;
   gap: 4px;
-  margin-top: 24px;
+  transition: opacity 160ms ease;
 }
 
 .streaming-badge span {
@@ -1302,10 +1431,123 @@ button:disabled {
   font-weight: 650;
 }
 
+.volume-control {
+  align-items: center;
+  display: flex;
+  height: 38px;
+  position: absolute;
+  right: 0;
+}
+
+.volume-disclosure,
+.volume-panel > button {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.68);
+  display: flex;
+  flex: none;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
+  width: 34px;
+}
+
+.volume-disclosure svg,
+.volume-panel > button svg {
+  height: 16px;
+  width: 16px;
+}
+
+.volume-control-open .volume-disclosure {
+  background: var(--lime-soft);
+  color: var(--lime);
+}
+
+.volume-panel {
+  align-items: center;
+  backdrop-filter: blur(18px);
+  background: rgba(20, 20, 18, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  display: flex;
+  gap: 9px;
+  opacity: 0;
+  overflow: hidden;
+  padding: 4px 0;
+  pointer-events: none;
+  position: absolute;
+  right: 41px;
+  transform: translateX(8px) scale(0.97);
+  transform-origin: right center;
+  transition: opacity 160ms ease, transform 200ms ease, width 200ms ease, padding 200ms ease;
+  width: 0;
+}
+
+.volume-control-open .volume-panel {
+  opacity: 1;
+  padding: 4px 9px 4px 4px;
+  pointer-events: auto;
+  transform: translateX(0) scale(1);
+  width: 192px;
+}
+
+.volume-panel > button {
+  background: transparent;
+  border-color: transparent;
+  height: 30px;
+  width: 30px;
+}
+
+.volume-panel input {
+  appearance: none;
+  background: linear-gradient(to right, var(--lime) var(--volume), rgba(255, 255, 255, 0.16) var(--volume));
+  border-radius: 10px;
+  flex: 1;
+  height: 4px;
+  margin: 0;
+  min-width: 72px;
+  outline: 0;
+}
+
+.volume-panel input::-webkit-slider-thumb {
+  appearance: none;
+  background: var(--lime);
+  border: 0;
+  border-radius: 50%;
+  height: 12px;
+  width: 12px;
+}
+
+.volume-panel input::-moz-range-thumb {
+  background: var(--lime);
+  border: 0;
+  border-radius: 50%;
+  height: 12px;
+  width: 12px;
+}
+
+.volume-panel output {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 8px;
+  text-align: right;
+  width: 25px;
+}
+
 .sheet-layer {
+  --canvas: #11110f;
+  --ink: #f5f2e9;
+  --lime: #d6ff57;
+  --lime-soft: rgba(214, 255, 87, 0.14);
+  --muted: #96968e;
+  --panel-2: #22221f;
+  --subtle: #6e6e67;
+  --line: rgba(255, 255, 255, 0.08);
+  color: var(--ink);
   inset: 0;
   position: fixed;
-  z-index: 50;
+  z-index: 75;
 }
 
 .sheet-backdrop {
@@ -1412,6 +1654,173 @@ button:disabled {
   width: 100%;
 }
 
+.music-picker-search {
+  margin-bottom: 10px;
+}
+
+.music-picker-list {
+  margin: 0 -6px;
+  max-height: min(47dvh, 420px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 6px;
+}
+
+.music-picker-list > button {
+  align-items: center;
+  background: transparent;
+  border-radius: 12px;
+  display: flex;
+  padding: 7px;
+  text-align: left;
+  width: 100%;
+}
+
+.music-picker-list > button.selected {
+  background: var(--lime-soft);
+}
+
+.music-picker-list > button > span {
+  flex: 1;
+  min-width: 0;
+  padding: 0 11px;
+}
+
+.music-picker-list strong,
+.music-picker-list small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.music-picker-list strong {
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.music-picker-list small {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.music-picker-list i {
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  color: var(--muted);
+  display: flex;
+  flex: none;
+  height: 27px;
+  justify-content: center;
+  width: 27px;
+}
+
+.music-picker-list .selected i {
+  background: var(--lime);
+  border-color: var(--lime);
+  color: var(--canvas);
+}
+
+.music-picker-list i svg {
+  height: 13px;
+  width: 13px;
+}
+
+.music-picker-empty {
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 30px auto;
+  max-width: 250px;
+  text-align: center;
+}
+
+.music-picker-footer {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding-top: 14px;
+}
+
+.music-picker-footer > span {
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.delete-playlist-confirmation {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0 12px;
+  text-align: center;
+}
+
+.delete-playlist-confirmation > span {
+  align-items: center;
+  background: rgba(255, 92, 92, 0.12);
+  border-radius: 50%;
+  color: #ff7878;
+  display: flex;
+  height: 52px;
+  justify-content: center;
+  margin-bottom: 15px;
+  width: 52px;
+}
+
+.delete-playlist-confirmation > span svg {
+  height: 20px;
+  width: 20px;
+}
+
+.delete-playlist-confirmation h2 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  margin: 0;
+}
+
+.delete-playlist-confirmation > p:not(.eyebrow) {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 10px 0 22px;
+  max-width: 290px;
+}
+
+.delete-playlist-confirmation > div {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.delete-playlist-confirmation > div > button {
+  flex: 1;
+}
+
+.danger-button {
+  align-items: center;
+  background: #d95454;
+  border-radius: 999px;
+  color: white;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 750;
+  gap: 8px;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 20px;
+}
+
+.danger-button svg {
+  height: 16px;
+  width: 16px;
+}
+
 .sheet-track {
   align-items: center;
   display: flex;
@@ -1498,6 +1907,16 @@ button:disabled {
 .play-now-action > span {
   background: var(--lime-soft);
   color: var(--lime);
+}
+
+.liked-action > span {
+  background: rgba(255, 102, 139, 0.12);
+  color: #ff668b;
+}
+
+.liked-action.liked > span {
+  background: #ff668b;
+  color: #251116;
 }
 
 .sheet-divider {
@@ -1676,7 +2095,7 @@ button:disabled {
 
 .skeleton {
   animation: shimmer 1.2s ease-in-out infinite alternate;
-  background: #20201d;
+  background: var(--panel-2);
   border-radius: 12px;
 }
 
@@ -1775,8 +2194,8 @@ button:disabled {
     margin-top: 18px;
   }
 
-  .streaming-badge {
-    margin-top: 14px;
+  .player-utility-row {
+    margin-top: 10px;
   }
 }
 

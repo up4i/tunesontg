@@ -7,6 +7,7 @@ type UserRow = {
   telegram_id: string;
   first_name: string;
   username: string | null;
+  photo_url: string | null;
 };
 
 type TrackRow = {
@@ -27,6 +28,7 @@ type PlaylistRow = {
   id: string;
   name: string;
   description: string;
+  kind: "standard" | "liked";
   created_at: string;
   track_count: number;
   duration: number;
@@ -49,6 +51,7 @@ function database(): Database.Database {
       telegram_id TEXT NOT NULL UNIQUE,
       first_name TEXT NOT NULL,
       username TEXT,
+      photo_url TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -76,6 +79,7 @@ function database(): Database.Database {
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'standard',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -103,6 +107,18 @@ function database(): Database.Database {
   if (!trackColumns.some((column) => column.name === "thumbnail_unique_id")) {
     db.exec("ALTER TABLE tracks ADD COLUMN thumbnail_unique_id TEXT");
   }
+  const userColumns = db.pragma("table_info(users)") as Array<{ name: string }>;
+  if (!userColumns.some((column) => column.name === "photo_url")) {
+    db.exec("ALTER TABLE users ADD COLUMN photo_url TEXT");
+  }
+  const playlistColumns = db.pragma("table_info(playlists)") as Array<{ name: string }>;
+  if (!playlistColumns.some((column) => column.name === "kind")) {
+    db.exec("ALTER TABLE playlists ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'");
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_owner_liked
+      ON playlists(owner_id) WHERE kind = 'liked';
+  `);
 
   global.__tunesDb = db;
   return db;
@@ -133,6 +149,7 @@ function toTrack(row: TrackRow): Track {
     artworkSeed: artworkSeed(row.telegram_file_unique_id),
     hasArtwork: Boolean(row.thumbnail_file_id),
     playable: !row.telegram_file_id.startsWith("demo:"),
+    liked: false,
   };
 }
 
@@ -141,16 +158,22 @@ export function upsertUser(user: TelegramUser): UserRow {
   const timestamp = now();
   const telegramId = String(user.id);
   db.prepare(`
-    INSERT INTO users (id, telegram_id, first_name, username, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO users (id, telegram_id, first_name, username, photo_url, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(telegram_id) DO UPDATE SET
       first_name = excluded.first_name,
       username = excluded.username,
+      photo_url = COALESCE(excluded.photo_url, users.photo_url),
       updated_at = excluded.updated_at
-  `).run(randomUUID(), telegramId, user.first_name, user.username ?? null, timestamp, timestamp);
+  `).run(randomUUID(), telegramId, user.first_name, user.username ?? null, user.photo_url ?? null, timestamp, timestamp);
 
-  return db.prepare("SELECT * FROM users WHERE telegram_id = ?")
+  const owner = db.prepare("SELECT * FROM users WHERE telegram_id = ?")
     .get(telegramId) as UserRow;
+  db.prepare(`
+    INSERT OR IGNORE INTO playlists (id, owner_id, name, description, kind, created_at, updated_at)
+    VALUES (?, ?, 'Liked Songs', 'Songs you love', 'liked', ?, ?)
+  `).run(randomUUID(), owner.id, timestamp, timestamp);
+  return owner;
 }
 
 export type IncomingTrack = {
@@ -167,9 +190,15 @@ export type IncomingTrack = {
   thumbnailUniqueId?: string;
 };
 
-export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
+export function saveTrackWithStatus(
+  user: TelegramUser,
+  track: IncomingTrack,
+): { track: Track; created: boolean } {
   const db = database();
   const owner = upsertUser(user);
+  const existing = db.prepare(`
+    SELECT 1 FROM tracks WHERE owner_id = ? AND telegram_file_unique_id = ?
+  `).get(owner.id, track.fileUniqueId);
   db.prepare(`
     INSERT INTO tracks (
       id, owner_id, telegram_file_id, telegram_file_unique_id,
@@ -195,7 +224,11 @@ export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
   const row = db.prepare(`
     SELECT * FROM tracks WHERE owner_id = ? AND telegram_file_unique_id = ?
   `).get(owner.id, track.fileUniqueId) as TrackRow;
-  return toTrack(row);
+  return { track: toTrack(row), created: !existing };
+}
+
+export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
+  return saveTrackWithStatus(user, track).track;
 }
 
 function seedDemoLibrary(ownerId: string): void {
@@ -241,14 +274,14 @@ function seedDemoLibrary(ownerId: string): void {
   );
 }
 
-function tracksForPlaylist(playlistId: string): Track[] {
+function tracksForPlaylist(playlistId: string, likedIds: Set<string>): Track[] {
   const rows = database().prepare(`
     SELECT t.* FROM playlist_tracks pt
     JOIN tracks t ON t.id = pt.track_id
     WHERE pt.playlist_id = ?
     ORDER BY pt.position ASC
   `).all(playlistId) as TrackRow[];
-  return rows.map(toTrack);
+  return rows.map((row) => ({ ...toTrack(row), liked: likedIds.has(row.id) }));
 }
 
 export function getLibrary(user: TelegramUser): LibraryPayload {
@@ -259,6 +292,12 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
   const trackRows = db.prepare(`
     SELECT * FROM tracks WHERE owner_id = ? ORDER BY added_at DESC
   `).all(owner.id) as TrackRow[];
+  const likedRows = db.prepare(`
+    SELECT pt.track_id FROM playlist_tracks pt
+    JOIN playlists p ON p.id = pt.playlist_id
+    WHERE p.owner_id = ? AND p.kind = 'liked'
+  `).all(owner.id) as Array<{ track_id: string }>;
+  const likedIds = new Set(likedRows.map((row) => row.track_id));
   const playlistRows = db.prepare(`
     SELECT p.*,
       COUNT(pt.track_id) AS track_count,
@@ -275,15 +314,16 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     id: row.id,
     name: row.name,
     description: row.description,
+    kind: row.kind,
     createdAt: row.created_at,
     trackCount: Number(row.track_count),
     duration: Number(row.duration),
-    tracks: tracksForPlaylist(row.id),
+    tracks: tracksForPlaylist(row.id, likedIds),
   }));
 
   return {
-    user: { firstName: owner.first_name, username: owner.username },
-    tracks: trackRows.map(toTrack),
+    user: { firstName: owner.first_name, username: owner.username, photoUrl: owner.photo_url },
+    tracks: trackRows.map((row) => ({ ...toTrack(row), liked: likedIds.has(row.id) })),
     playlists,
     demo: trackRows.some((track) => track.telegram_file_id.startsWith("demo:")),
   };
@@ -308,21 +348,78 @@ export function addTrackToPlaylist(
   playlistId: string,
   trackId: string,
 ): void {
+  addTracksToPlaylist(user, playlistId, [trackId]);
+}
+
+export function addTracksToPlaylist(
+  user: TelegramUser,
+  playlistId: string,
+  trackIds: string[],
+): number {
   const db = database();
   const owner = upsertUser(user);
-  const owns = db.prepare(`
-    SELECT 1 FROM playlists p JOIN tracks t ON t.owner_id = p.owner_id
-    WHERE p.id = ? AND t.id = ? AND p.owner_id = ?
-  `).get(playlistId, trackId, owner.id);
-  if (!owns) throw new Error("Playlist or track was not found.");
+  const uniqueTrackIds = [...new Set(trackIds)];
+  if (!uniqueTrackIds.length) return 0;
+  const ownsPlaylist = db.prepare(`
+    SELECT 1 FROM playlists WHERE id = ? AND owner_id = ?
+  `).get(playlistId, owner.id);
+  if (!ownsPlaylist) throw new Error("Playlist was not found.");
+  const placeholders = uniqueTrackIds.map(() => "?").join(",");
+  const ownedTracks = db.prepare(`
+    SELECT id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+  `).all(owner.id, ...uniqueTrackIds) as Array<{ id: string }>;
+  if (ownedTracks.length !== uniqueTrackIds.length) throw new Error("One or more tracks were not found.");
   const position = db.prepare(`
     SELECT COALESCE(MAX(position), -1) + 1 AS position
     FROM playlist_tracks WHERE playlist_id = ?
   `).get(playlistId) as { position: number };
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  return db.transaction(() => {
+    let nextPosition = position.position;
+    let added = 0;
+    for (const trackId of uniqueTrackIds) {
+      const result = insert.run(playlistId, trackId, nextPosition, now());
+      if (result.changes) {
+        nextPosition += 1;
+        added += 1;
+      }
+    }
+    return added;
+  })();
+}
+
+export function deletePlaylist(user: TelegramUser, playlistId: string): void {
+  const owner = upsertUser(user);
+  const result = database().prepare(`
+    DELETE FROM playlists WHERE id = ? AND owner_id = ? AND kind = 'standard'
+  `).run(playlistId, owner.id);
+  if (!result.changes) throw new Error("Playlist was not found.");
+}
+
+export function setTrackLiked(user: TelegramUser, trackId: string, liked: boolean): void {
+  const db = database();
+  const owner = upsertUser(user);
+  const track = db.prepare("SELECT 1 FROM tracks WHERE id = ? AND owner_id = ?")
+    .get(trackId, owner.id);
+  if (!track) throw new Error("Track was not found.");
+  const playlist = db.prepare("SELECT id FROM playlists WHERE owner_id = ? AND kind = 'liked'")
+    .get(owner.id) as { id: string };
+  if (!liked) {
+    db.prepare("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?")
+      .run(playlist.id, trackId);
+    return;
+  }
+  const position = db.prepare(`
+    SELECT COALESCE(MAX(position), -1) + 1 AS position
+    FROM playlist_tracks WHERE playlist_id = ?
+  `).get(playlist.id) as { position: number };
   db.prepare(`
     INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
     VALUES (?, ?, ?, ?)
-  `).run(playlistId, trackId, position.position, now());
+  `).run(playlist.id, trackId, position.position, now());
 }
 
 export function removeTrackFromPlaylist(

@@ -9,6 +9,7 @@ export type Track = {
   artworkSeed: number;
   hasArtwork: boolean;
   playable: boolean;
+  liked: boolean;
   streamUrl?: string;
   artworkUrl?: string;
 };
@@ -17,6 +18,7 @@ export type Playlist = {
   id: string;
   name: string;
   description: string;
+  kind: "standard" | "liked";
   createdAt: string;
   trackCount: number;
   duration: number;
@@ -27,6 +29,7 @@ export type LibraryPayload = {
   user: {
     firstName: string;
     username: string | null;
+    photoUrl: string | null;
   };
   tracks: Track[];
   playlists: Playlist[];

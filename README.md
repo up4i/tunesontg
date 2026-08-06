@@ -9,8 +9,10 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Private audio inbox: accepts Telegram `audio` messages and audio documents
 - No copied audio: stores durable Telegram `file_id` references and metadata
 - Per-user libraries validated from signed Telegram Mini App `initData`
-- Searchable, responsive music UI with Telegram theme/safe-area support
-- Playlist creation, add/remove tracks, play, and shuffle
+- Searchable, responsive music UI with automatic Telegram light/dark themes and safe-area support
+- Telegram profile photos with an initial-based fallback
+- Playlist creation, searchable bulk add, remove, delete, play, and shuffle
+- A protected, default Liked Songs collection
 - Full now-playing UI with pause, seek, previous/next, repeat, and queue state
 - Telegram album-cover thumbnails when the incoming audio includes one
 - Stateless, Range-aware Telegram streaming for seeking without audio storage
@@ -18,6 +20,7 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Optional native Telegram playback handoff through `sendAudio` / `sendMediaGroup`
 - Local demo library for designing and testing without a bot token
 - Webhook secret validation and user-scoped database queries
+- Duplicate Telegram-file detection with clear bot feedback
 
 ## Playback architecture
 
@@ -116,8 +119,10 @@ scripts/set-webhook.ts           Bot webhook/menu bootstrap
 
 ## Sensible next steps
 
+Tester reports and their triaged backlog live in [`docs/feedback`](docs/feedback). The current report is [Windows PC testing from 2026-08-06](docs/feedback/2026-08-06-gagster-windows.md).
+
 - Metadata editing for documents that arrive without artist/duration tags
-- Playlist rename, delete, and drag-to-reorder
+- Playlist rename and drag-to-reorder
 - Pagination and Telegram-aware rate limiting for large queues
 - Postgres migration before horizontal scaling
 - Inline mode for sharing a saved track into another chat

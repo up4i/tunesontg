@@ -5,13 +5,16 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Heart,
   House,
   Inbox,
   Library,
   ListMusic,
   ListPlus,
   LoaderCircle,
+  MonitorSmartphone,
   MoreHorizontal,
+  Moon,
   Music2,
   Pause,
   Play,
@@ -23,12 +26,18 @@ import {
   SkipBack,
   SkipForward,
   Sparkles,
+  Sun,
+  Trash2,
+  Volume2,
+  VolumeX,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LibraryPayload, Playlist, Track } from "@/lib/types";
 
 type Tab = "home" | "library" | "playlists";
+type ThemeMode = "telegram" | "light" | "dark";
+type ResolvedTheme = "light" | "dark";
 type Toast = { kind: "success" | "error"; message: string } | null;
 
 function initData(): string {
@@ -101,6 +110,7 @@ function Cover({
 
 function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?: boolean }) {
   const tracks = playlist.tracks.slice(0, 4);
+  const EmptyIcon = playlist.kind === "liked" ? Heart : Music2;
   const tiles: Array<Track | null> = tracks.length
     ? tracks
     : Array.from({ length: 4 }, () => null);
@@ -112,7 +122,7 @@ function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?
           key={track?.id ?? index}
           style={track?.artworkUrl ? { backgroundImage: `url(${track.artworkUrl})` } : undefined}
         >
-          {index === 3 && !track ? <Music2 aria-hidden="true" /> : null}
+          {index === 3 && !track ? <EmptyIcon aria-hidden="true" /> : null}
         </div>
       ))}
     </div>
@@ -171,11 +181,14 @@ function Skeleton() {
 
 export function MusicApp() {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [addMusicPlaylistId, setAddMusicPlaylistId] = useState<string | null>(null);
+  const [deletePlaylistTarget, setDeletePlaylistTarget] = useState<Playlist | null>(null);
   const [trackMenu, setTrackMenu] = useState<Track | null>(null);
   const [sending, setSending] = useState(false);
   const [mutating, setMutating] = useState(false);
@@ -189,6 +202,19 @@ export function MusicApp() {
   const [playerOpen, setPlayerOpen] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatOne, setRepeatOne] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    if (typeof window === "undefined") return "telegram";
+    const saved = window.localStorage.getItem("tune:theme");
+    return saved === "light" || saved === "dark" || saved === "telegram" ? saved : "telegram";
+  });
+  const [hostTheme, setHostTheme] = useState<ResolvedTheme>(() => {
+    if (typeof window === "undefined") return "dark";
+    return window.Telegram?.WebApp.colorScheme
+      ?? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  });
+  const effectiveTheme = themeMode === "telegram" ? hostTheme : themeMode;
 
   const loadLibrary = useCallback(async () => {
     try {
@@ -213,8 +239,9 @@ export function MusicApp() {
       webApp?.ready();
       webApp?.expand();
       if (webApp?.isVersionAtLeast("6.1")) {
-        webApp.setHeaderColor("#11110f");
-        webApp.setBackgroundColor("#11110f");
+        const light = document.documentElement.dataset.theme === "light";
+        webApp.setHeaderColor(light ? "#f8f6ef" : "#11110f");
+        webApp.setBackgroundColor(light ? "#f8f6ef" : "#11110f");
       }
       void loadLibrary();
     };
@@ -223,10 +250,68 @@ export function MusicApp() {
   }, [loadLibrary]);
 
   useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    let timer = 0;
+    let attempts = 0;
+    let webApp = window.Telegram?.WebApp;
+    const update = () => setHostTheme(webApp?.colorScheme ?? (media.matches ? "light" : "dark"));
+    const connect = () => {
+      webApp = window.Telegram?.WebApp;
+      if (!webApp && process.env.NODE_ENV === "production" && attempts < 50) {
+        attempts += 1;
+        timer = window.setTimeout(connect, 100);
+        return;
+      }
+      update();
+      webApp?.onEvent?.("themeChanged", update);
+    };
+    media.addEventListener("change", update);
+    connect();
+    return () => {
+      window.clearTimeout(timer);
+      media.removeEventListener("change", update);
+      webApp?.offEvent?.("themeChanged", update);
+    };
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = effectiveTheme;
+    window.localStorage.setItem("tune:theme", themeMode);
+    const color = effectiveTheme === "light" ? "#f8f6ef" : "#11110f";
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", color);
+    const webApp = window.Telegram?.WebApp;
+    if (webApp?.isVersionAtLeast("6.1")) {
+      webApp.setHeaderColor(color);
+      webApp.setBackgroundColor(color);
+    }
+  }, [effectiveTheme, themeMode]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 3500);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const savedVolume = Number(window.localStorage.getItem("tune:volume"));
+    const savedMuted = window.localStorage.getItem("tune:muted") === "true";
+    const nextVolume = Number.isFinite(savedVolume) && savedVolume >= 0 && savedVolume <= 1
+      ? savedVolume
+      : 1;
+    audio.volume = nextVolume;
+    audio.muted = savedMuted;
+    setVolume(nextVolume);
+    setMuted(savedMuted);
+  }, []);
+
+  useEffect(() => {
+    if (!playerOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [playerOpen]);
 
   const selectedPlaylist = library?.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
   const currentTrack = queue[queueIndex] ?? null;
@@ -330,6 +415,37 @@ export function MusicApp() {
     setCurrentTime(seconds);
   }, []);
 
+  const changeVolume = useCallback((nextVolume: number) => {
+    const normalized = Math.min(1, Math.max(0, nextVolume));
+    const nextMuted = normalized === 0;
+    const audio = audioRef.current;
+    if (audio) {
+      audio.volume = normalized;
+      audio.muted = nextMuted;
+    }
+    setVolume(normalized);
+    setMuted(nextMuted);
+    window.localStorage.setItem("tune:volume", String(normalized));
+    window.localStorage.setItem("tune:muted", String(nextMuted));
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const nextMuted = !muted;
+    const nextVolume = !nextMuted && volume === 0 ? 0.75 : volume;
+    const audio = audioRef.current;
+    if (audio) {
+      audio.volume = nextVolume;
+      audio.muted = nextMuted;
+    }
+    if (nextVolume !== volume) {
+      setVolume(nextVolume);
+      window.localStorage.setItem("tune:volume", String(nextVolume));
+    }
+    setMuted(nextMuted);
+    window.localStorage.setItem("tune:muted", String(nextMuted));
+    haptic();
+  }, [muted, volume]);
+
   const toggleShuffle = useCallback(() => {
     if (!currentTrack || !queue.length) return;
     if (!shuffleEnabled) {
@@ -342,6 +458,43 @@ export function MusicApp() {
     }
     haptic();
   }, [currentTrack, queue, shuffleEnabled]);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
+        event.preventDefault();
+        setTab("library");
+        setSelectedPlaylistId(null);
+        window.setTimeout(() => searchInputRef.current?.focus(), 0);
+        return;
+      }
+
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const input = target instanceof HTMLInputElement ? target : null;
+      const typing = target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || target?.isContentEditable
+        || (input && input.type !== "range");
+      if (typing || target?.closest("button, a, [role='button']")) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+      if ((event.code === "Space" || event.key === " ") && currentTrack) {
+        event.preventDefault();
+        togglePlayback();
+        return;
+      }
+      if (event.key === "ArrowLeft" && currentTrack) {
+        event.preventDefault();
+        seekTo(Math.max(0, (audioRef.current?.currentTime ?? 0) - 10));
+      } else if (event.key === "ArrowRight" && currentTrack) {
+        event.preventDefault();
+        const end = mediaDuration || currentTrack.duration || Number.POSITIVE_INFINITY;
+        seekTo(Math.min(end, (audioRef.current?.currentTime ?? 0) + 10));
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentTrack, mediaDuration, seekTo, togglePlayback]);
 
   useEffect(() => {
     if (!currentTrack || !("mediaSession" in navigator)) return;
@@ -438,6 +591,45 @@ export function MusicApp() {
     }
   }
 
+  async function addManyToPlaylist(playlistId: string, trackIds: string[]) {
+    if (!trackIds.length) return;
+    setMutating(true);
+    try {
+      const result = await api<{ added: number }>(`/api/playlists/${playlistId}/tracks`, {
+        method: "POST",
+        body: JSON.stringify({ trackIds }),
+      });
+      await loadLibrary();
+      setAddMusicPlaylistId(null);
+      haptic("success");
+      setToast({
+        kind: "success",
+        message: result.added === 1 ? "Added 1 song" : `Added ${result.added} songs`,
+      });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not add songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function removePlaylist(playlistId: string) {
+    setMutating(true);
+    try {
+      await api(`/api/playlists/${playlistId}`, { method: "DELETE" });
+      await loadLibrary();
+      setDeletePlaylistTarget(null);
+      setAddMusicPlaylistId(null);
+      setSelectedPlaylistId(null);
+      haptic("success");
+      setToast({ kind: "success", message: "Playlist deleted. Your songs are still in Library." });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not delete playlist." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
   async function removeFromPlaylist(playlistId: string, trackId: string) {
     setMutating(true);
     try {
@@ -453,11 +645,42 @@ export function MusicApp() {
     }
   }
 
+  async function toggleTrackLiked(track: Track) {
+    const nextLiked = !track.liked;
+    setMutating(true);
+    try {
+      await api(`/api/tracks/${track.id}/like`, {
+        method: "PUT",
+        body: JSON.stringify({ liked: nextLiked }),
+      });
+      setQueue((current) => current.map((item) =>
+        item.id === track.id ? { ...item, liked: nextLiked } : item,
+      ));
+      await loadLibrary();
+      setTrackMenu(null);
+      haptic("success");
+      setToast({ kind: "success", message: nextLiked ? "Added to Liked Songs" : "Removed from Liked Songs" });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update Liked Songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
   function switchTab(next: Tab) {
     haptic();
     setTab(next);
     setSelectedPlaylistId(null);
     setSearch("");
+  }
+
+  function cycleTheme() {
+    setThemeMode((current) => {
+      if (current === "telegram") return hostTheme === "dark" ? "light" : "dark";
+      if (current === hostTheme) return "telegram";
+      return hostTheme;
+    });
+    haptic();
   }
 
   if (error) {
@@ -519,6 +742,9 @@ export function MusicApp() {
           {tab === "home" ? (
             <HomeScreen
               library={library}
+              themeMode={themeMode}
+              effectiveTheme={effectiveTheme}
+              onThemeChange={cycleTheme}
               onPlay={(track) => startInAppQueue(
                 library.tracks,
                 false,
@@ -533,6 +759,7 @@ export function MusicApp() {
           ) : null}
           {tab === "library" ? (
             <LibraryScreen
+              searchInputRef={searchInputRef}
               tracks={filteredTracks}
               total={library.tracks.length}
               search={search}
@@ -566,6 +793,8 @@ export function MusicApp() {
                 selectedPlaylist.tracks.findIndex((item) => item.id === track.id),
               )}
               onMore={setTrackMenu}
+              onAddMusic={() => setAddMusicPlaylistId(selectedPlaylist.id)}
+              onDelete={() => setDeletePlaylistTarget(selectedPlaylist)}
               sending={sending}
             />
           ) : null}
@@ -590,6 +819,23 @@ export function MusicApp() {
           onCreate={(name, description) => void createPlaylist(name, description)}
         />
       ) : null}
+      {addMusicPlaylistId && library ? (
+        <AddMusicSheet
+          playlist={library.playlists.find((playlist) => playlist.id === addMusicPlaylistId) ?? null}
+          tracks={library.tracks}
+          busy={mutating}
+          onClose={() => setAddMusicPlaylistId(null)}
+          onAdd={(trackIds) => void addManyToPlaylist(addMusicPlaylistId, trackIds)}
+        />
+      ) : null}
+      {deletePlaylistTarget ? (
+        <DeletePlaylistSheet
+          playlist={deletePlaylistTarget}
+          busy={mutating}
+          onClose={() => setDeletePlaylistTarget(null)}
+          onDelete={() => void removePlaylist(deletePlaylistTarget.id)}
+        />
+      ) : null}
       {trackMenu && library ? (
         <TrackSheet
           track={trackMenu}
@@ -602,13 +848,17 @@ export function MusicApp() {
             startInAppQueue([trackMenu]);
           }}
           onSendTelegram={() => { setTrackMenu(null); void sendQueue([trackMenu.id]); }}
+          onToggleLiked={() => void toggleTrackLiked(trackMenu)}
           onAdd={addToPlaylist}
-          onRemove={selectedPlaylist ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id) : undefined}
+          onRemove={selectedPlaylist && selectedPlaylist.kind === "standard"
+            ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id)
+            : undefined}
           onNewPlaylist={() => { setTrackMenu(null); setCreateOpen(true); }}
         />
       ) : null}
-      {playerOpen && currentTrack ? (
+      {currentTrack ? (
         <NowPlaying
+          open={playerOpen}
           track={currentTrack}
           queuePosition={queueIndex + 1}
           queueLength={queue.length}
@@ -617,6 +867,8 @@ export function MusicApp() {
           isPlaying={isPlaying}
           shuffleEnabled={shuffleEnabled}
           repeatOne={repeatOne}
+          volume={volume}
+          muted={muted}
           onClose={() => setPlayerOpen(false)}
           onToggle={togglePlayback}
           onPrevious={previousTrack}
@@ -624,6 +876,9 @@ export function MusicApp() {
           onSeek={seekTo}
           onShuffle={toggleShuffle}
           onRepeat={() => { setRepeatOne((value) => !value); haptic(); }}
+          onVolumeChange={changeVolume}
+          onMuteToggle={toggleMute}
+          onMore={() => setTrackMenu(currentTrack)}
         />
       ) : null}
       {sending ? (
@@ -639,20 +894,50 @@ export function MusicApp() {
   );
 }
 
-function Header({ name, subtitle = "Your music, right here." }: { name: string; subtitle?: string }) {
+function Header({
+  name,
+  photoUrl,
+  themeMode,
+  effectiveTheme,
+  onThemeChange,
+  subtitle = "Your music, right here.",
+}: {
+  name: string;
+  photoUrl: string | null;
+  themeMode: ThemeMode;
+  effectiveTheme: ResolvedTheme;
+  onThemeChange: () => void;
+  subtitle?: string;
+}) {
+  const ThemeIcon = themeMode === "telegram"
+    ? MonitorSmartphone
+    : effectiveTheme === "dark"
+      ? Moon
+      : Sun;
+  const themeLabel = themeMode === "telegram" ? `Telegram ${effectiveTheme}` : effectiveTheme;
   return (
     <header className="topbar">
       <div>
         <div className="wordmark"><span>t</span>une</div>
         <p>{subtitle}</p>
       </div>
-      <div className="avatar" aria-label={`${name}'s profile`}>{name.charAt(0).toUpperCase()}</div>
+      <div className="topbar-actions">
+        <button className="theme-toggle" onClick={onThemeChange} aria-label={`Theme: ${themeLabel}. Change theme`} title={`Theme: ${themeLabel}`}>
+          <ThemeIcon />
+        </button>
+        <div className="avatar" aria-label={`${name}'s profile`}>
+          {photoUrl ? <span className="avatar-image" style={{ backgroundImage: `url(${photoUrl})` }} /> : name.charAt(0).toUpperCase()}
+        </div>
+      </div>
     </header>
   );
 }
 
 function HomeScreen({
   library,
+  themeMode,
+  effectiveTheme,
+  onThemeChange,
   onPlay,
   onMore,
   onPlaylist,
@@ -661,6 +946,9 @@ function HomeScreen({
   sending,
 }: {
   library: LibraryPayload;
+  themeMode: ThemeMode;
+  effectiveTheme: ResolvedTheme;
+  onThemeChange: () => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
   onPlaylist: (id: string) => void;
@@ -668,11 +956,19 @@ function HomeScreen({
   onShuffle: () => void;
   sending: boolean;
 }) {
-  const featured = library.playlists[0];
+  const featured = library.playlists.find((playlist) => playlist.trackCount > 0)
+    ?? library.playlists.find((playlist) => playlist.kind === "standard")
+    ?? library.playlists[0];
   const recent = library.tracks.slice(0, 4);
   return (
     <main className="screen home-screen">
-      <Header name={library.user.firstName} />
+      <Header
+        name={library.user.firstName}
+        photoUrl={library.user.photoUrl}
+        themeMode={themeMode}
+        effectiveTheme={effectiveTheme}
+        onThemeChange={onThemeChange}
+      />
 
       <section className="welcome-block">
         <p className="eyebrow">Good evening, {library.user.firstName}</p>
@@ -722,6 +1018,7 @@ function HomeScreen({
 }
 
 function LibraryScreen({
+  searchInputRef,
   tracks,
   total,
   search,
@@ -731,6 +1028,7 @@ function LibraryScreen({
   onShuffle,
   sending,
 }: {
+  searchInputRef: React.RefObject<HTMLInputElement | null>;
   tracks: Track[];
   total: number;
   search: string;
@@ -748,7 +1046,14 @@ function LibraryScreen({
       </div>
       <label className="search-box">
         <Search aria-hidden="true" />
-        <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search songs or artists" />
+        <input
+          ref={searchInputRef}
+          aria-keyshortcuts="Control+K Meta+K"
+          aria-label="Search songs or artists"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search songs or artists"
+        />
         {search ? <button onClick={() => setSearch("")} aria-label="Clear search"><X /></button> : null}
       </label>
       <div className="list-meta"><span>{search ? `${tracks.length} found` : `${total} songs`}</span><span>Recently added</span></div>
@@ -801,6 +1106,8 @@ function PlaylistDetail({
   onShuffle,
   onTrackPlay,
   onMore,
+  onAddMusic,
+  onDelete,
   sending,
 }: {
   playlist: Playlist;
@@ -809,6 +1116,8 @@ function PlaylistDetail({
   onShuffle: () => void;
   onTrackPlay: (track: Track) => void;
   onMore: (track: Track) => void;
+  onAddMusic: () => void;
+  onDelete: () => void;
   sending: boolean;
 }) {
   return (
@@ -821,14 +1130,18 @@ function PlaylistDetail({
         {playlist.description ? <p className="playlist-description">{playlist.description}</p> : null}
         <p className="playlist-stats">{playlist.trackCount} songs · {formatCollectionDuration(playlist.duration)}</p>
         <div className="playlist-actions">
+          <button className="secondary-button playlist-add-music" onClick={onAddMusic}><ListPlus /> Add music</button>
           <button className="secondary-button" onClick={onShuffle} disabled={sending || !playlist.trackCount}><Shuffle /> Shuffle</button>
           <button className="play-button" onClick={onPlay} disabled={sending || !playlist.trackCount}><Play fill="currentColor" /></button>
+          {playlist.kind === "standard" ? (
+            <button className="playlist-delete" onClick={onDelete} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
+          ) : null}
         </div>
       </section>
       <section className="playlist-track-list">
         {playlist.tracks.length ? playlist.tracks.map((track, index) => (
           <TrackRow key={track.id} track={track} ordinal={index + 1} onPlay={() => onTrackPlay(track)} onMore={() => onMore(track)} />
-        )) : <EmptyState title="This playlist is waiting" copy="Open a song’s menu from your library to add it here." />}
+        )) : <EmptyState title="This playlist is waiting" copy="Use Add music to choose songs from your library." />}
       </section>
     </main>
   );
@@ -862,6 +1175,7 @@ function MiniPlayer({
 }
 
 function NowPlaying({
+  open,
   track,
   queuePosition,
   queueLength,
@@ -870,6 +1184,8 @@ function NowPlaying({
   isPlaying,
   shuffleEnabled,
   repeatOne,
+  volume,
+  muted,
   onClose,
   onToggle,
   onPrevious,
@@ -877,7 +1193,11 @@ function NowPlaying({
   onSeek,
   onShuffle,
   onRepeat,
+  onVolumeChange,
+  onMuteToggle,
+  onMore,
 }: {
+  open: boolean;
   track: Track;
   queuePosition: number;
   queueLength: number;
@@ -886,6 +1206,8 @@ function NowPlaying({
   isPlaying: boolean;
   shuffleEnabled: boolean;
   repeatOne: boolean;
+  volume: number;
+  muted: boolean;
   onClose: () => void;
   onToggle: () => void;
   onPrevious: () => void;
@@ -893,15 +1215,27 @@ function NowPlaying({
   onSeek: (seconds: number) => void;
   onShuffle: () => void;
   onRepeat: () => void;
+  onVolumeChange: (volume: number) => void;
+  onMuteToggle: () => void;
+  onMore: () => void;
 }) {
+  const [volumeOpen, setVolumeOpen] = useState(false);
   const safeDuration = Math.max(duration || 0, 0);
+  const displayedVolume = muted ? 0 : volume;
+  const VolumeIcon = muted || volume === 0 ? VolumeX : Volume2;
   return (
-    <section className={`now-playing cover-${track.artworkSeed % 8}`} role="dialog" aria-modal="true" aria-label="Now playing">
+    <section
+      className={`now-playing cover-${track.artworkSeed % 8} ${open ? "now-playing-open" : ""}`}
+      role="dialog"
+      aria-modal={open ? "true" : undefined}
+      aria-hidden={!open}
+      aria-label="Now playing"
+    >
       <div className="now-playing-wash" />
       <header className="player-header">
         <button onClick={onClose} aria-label="Minimize player"><ChevronDown /></button>
-        <div><span>Now playing</span><strong>From your Telegram library</strong></div>
-        <span className="queue-count">{queuePosition}/{queueLength}</span>
+        <div><span>Now playing</span><strong>From your Telegram library · {queuePosition}/{queueLength}</strong></div>
+        <button onClick={onMore} aria-label={`More options for ${track.title}`}><MoreHorizontal /></button>
       </header>
       <div className="player-content">
         <div className="hero-cover-wrap">
@@ -929,13 +1263,48 @@ function NowPlaying({
         <div className="player-controls">
           <button className={shuffleEnabled ? "active" : ""} onClick={onShuffle} aria-label="Shuffle"><Shuffle /></button>
           <button onClick={onPrevious} aria-label="Previous track"><SkipBack fill="currentColor" /></button>
-          <button className="player-main-control" onClick={onToggle} aria-label={isPlaying ? "Pause" : "Play"}>
+          <button className="player-main-control" onClick={onToggle} aria-keyshortcuts="Space" aria-label={isPlaying ? "Pause" : "Play"}>
             {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
           </button>
           <button onClick={onNext} aria-label="Next track"><SkipForward fill="currentColor" /></button>
           <button className={repeatOne ? "active" : ""} onClick={onRepeat} aria-label="Repeat track"><Repeat2 /></button>
         </div>
-        <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
+        <div className="player-utility-row">
+          <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
+          <div className={`volume-control ${volumeOpen ? "volume-control-open" : ""}`}>
+            <button
+              className="volume-disclosure"
+              onClick={() => setVolumeOpen((value) => !value)}
+              aria-expanded={volumeOpen}
+              aria-controls="player-volume-panel"
+              aria-label="Volume controls"
+            >
+              <VolumeIcon />
+            </button>
+            <div className="volume-panel" id="player-volume-panel" aria-hidden={!volumeOpen}>
+              <button
+                onClick={onMuteToggle}
+                disabled={!volumeOpen}
+                aria-label={muted ? "Unmute" : "Mute"}
+                title={muted ? "Unmute" : "Mute"}
+              >
+                <VolumeIcon />
+              </button>
+              <input
+                aria-label="Volume"
+                type="range"
+                min="0"
+                max="1"
+                step="0.01"
+                value={displayedVolume}
+                disabled={!volumeOpen}
+                onChange={(event) => onVolumeChange(Number(event.target.value))}
+                style={{ "--volume": `${displayedVolume * 100}%` } as React.CSSProperties}
+              />
+              <output>{Math.round(displayedVolume * 100)}%</output>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   );
@@ -988,6 +1357,121 @@ function CreatePlaylistSheet({ busy, onClose, onCreate }: { busy: boolean; onClo
   );
 }
 
+function AddMusicSheet({
+  playlist,
+  tracks,
+  busy,
+  onClose,
+  onAdd,
+}: {
+  playlist: Playlist | null;
+  tracks: Track[];
+  busy: boolean;
+  onClose: () => void;
+  onAdd: (trackIds: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const existingIds = useMemo(
+    () => new Set(playlist?.tracks.map((track) => track.id) ?? []),
+    [playlist?.tracks],
+  );
+  const availableTracks = useMemo(() => {
+    const query = search.trim().toLocaleLowerCase();
+    return tracks.filter((track) =>
+      !existingIds.has(track.id)
+      && (!query || `${track.title} ${track.artist}`.toLocaleLowerCase().includes(query)),
+    );
+  }, [existingIds, search, tracks]);
+
+  if (!playlist) return null;
+
+  function toggleTrack(trackId: string) {
+    setSelectedIds((current) => current.includes(trackId)
+      ? current.filter((id) => id !== trackId)
+      : [...current, trackId]);
+  }
+
+  return (
+    <Sheet onClose={onClose} title={`Add music to ${playlist.name}`}>
+      <div className="sheet-heading">
+        <div><p className="eyebrow">{playlist.name}</p><h2>Add music</h2></div>
+        <button className="icon-button" onClick={onClose} aria-label="Close"><X /></button>
+      </div>
+      <label className="search-box music-picker-search">
+        <Search aria-hidden="true" />
+        <input
+          autoFocus
+          aria-label="Search your library"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search your library"
+        />
+        {search ? <button onClick={() => setSearch("")} aria-label="Clear search"><X /></button> : null}
+      </label>
+      <div className="music-picker-list">
+        {availableTracks.length ? availableTracks.map((track) => {
+          const selected = selectedIds.includes(track.id);
+          return (
+            <button
+              type="button"
+              className={selected ? "selected" : ""}
+              key={track.id}
+              aria-pressed={selected}
+              disabled={busy}
+              onClick={() => toggleTrack(track.id)}
+            >
+              <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />
+              <span><strong>{track.title}</strong><small>{track.artist} · {formatDuration(track.duration)}</small></span>
+              <i>{selected ? <Check /> : <Plus />}</i>
+            </button>
+          );
+        }) : (
+          <p className="music-picker-empty">
+            {search ? "No matching songs are available." : "Every song in your library is already in this playlist."}
+          </p>
+        )}
+      </div>
+      <div className="music-picker-footer">
+        <span>{selectedIds.length ? `${selectedIds.length} selected` : "Choose one or more songs"}</span>
+        <button className="primary-button" disabled={busy || !selectedIds.length} onClick={() => onAdd(selectedIds)}>
+          {busy ? <LoaderCircle className="spin" /> : <ListPlus />}
+          Add {selectedIds.length || "music"}
+        </button>
+      </div>
+    </Sheet>
+  );
+}
+
+function DeletePlaylistSheet({
+  playlist,
+  busy,
+  onClose,
+  onDelete,
+}: {
+  playlist: Playlist;
+  busy: boolean;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <Sheet onClose={onClose} title={`Delete ${playlist.name}`}>
+      <div className="delete-playlist-confirmation">
+        <span><Trash2 /></span>
+        <p className="eyebrow">Delete playlist</p>
+        <h2>Delete “{playlist.name}”?</h2>
+        <p>The playlist will be removed, but its {playlist.trackCount === 1 ? "song stays" : "songs stay"} in your Library.</p>
+        <div>
+          <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="danger-button" onClick={onDelete} disabled={busy}>
+            {busy ? <LoaderCircle className="spin" /> : <Trash2 />} Delete playlist
+          </button>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
 function TrackSheet({
   track,
   playlists,
@@ -996,6 +1480,7 @@ function TrackSheet({
   onClose,
   onPlayNow,
   onSendTelegram,
+  onToggleLiked,
   onAdd,
   onRemove,
   onNewPlaylist,
@@ -1007,10 +1492,12 @@ function TrackSheet({
   onClose: () => void;
   onPlayNow: () => void;
   onSendTelegram: () => void;
+  onToggleLiked: () => void;
   onAdd: (playlistId: string, trackId: string) => void;
   onRemove?: () => void;
   onNewPlaylist: () => void;
 }) {
+  const standardPlaylists = playlists.filter((playlist) => playlist.kind === "standard");
   return (
     <Sheet onClose={onClose} title={`Options for ${track.title}`}>
       <div className="sheet-track">
@@ -1019,12 +1506,17 @@ function TrackSheet({
         <button className="icon-button" onClick={onClose}><X /></button>
       </div>
       <button className="sheet-action play-now-action" onClick={onPlayNow} disabled={busy || !track.playable}><span><Play fill="currentColor" /></span><div><strong>Play now</strong><small>Listen here with full controls</small></div><ChevronRight /></button>
+      <button className={`sheet-action liked-action ${track.liked ? "liked" : ""}`} onClick={onToggleLiked} disabled={busy}>
+        <span><Heart fill={track.liked ? "currentColor" : "none"} /></span>
+        <div><strong>{track.liked ? "Remove from Liked Songs" : "Add to Liked Songs"}</strong><small>{track.liked ? "Keep the song in your library" : "Save it with your favorites"}</small></div>
+        <ChevronRight />
+      </button>
       <button className="sheet-action" onClick={onSendTelegram} disabled={busy}><span><Send /></span><div><strong>Send to Telegram player</strong><small>Play it as an audio message in chat</small></div><ChevronRight /></button>
       {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from {currentPlaylist?.name}</strong><small>The song stays in your library</small></div><ChevronRight /></button> : null}
       <div className="sheet-divider" />
       <div className="sheet-subheading"><span>Add to playlist</span><button onClick={onNewPlaylist}><Plus /> New</button></div>
       <div className="playlist-options">
-        {playlists.length ? playlists.map((playlist) => {
+        {standardPlaylists.length ? standardPlaylists.map((playlist) => {
           const alreadyAdded = playlist.tracks.some((item) => item.id === track.id);
           return (
             <button key={playlist.id} disabled={busy || alreadyAdded} onClick={() => onAdd(playlist.id, track.id)}>
