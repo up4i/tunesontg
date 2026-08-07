@@ -35,6 +35,13 @@ export function botChatUrl(): string | null {
   return username ? `https://t.me/${username}` : null;
 }
 
+export function miniAppDeepLink(startParam: string): string {
+  const username = process.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "");
+  return username
+    ? `https://t.me/${username}?startapp=${encodeURIComponent(startParam)}`
+    : `${appUrl()}?startapp=${encodeURIComponent(startParam)}`;
+}
+
 export function telegramFileUrl(filePath: string): string {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new TelegramApiError("TELEGRAM_BOT_TOKEN is not configured.");

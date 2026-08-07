@@ -5,12 +5,19 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import {
   addTracksToPlaylist,
+  createPlaylistShare,
   createPlaylist,
+  createTrackShare,
   deletePlaylist,
   getLibrary,
+  getSharedPlaylistPreview,
+  getSharedSongPreview,
+  importSharedSong,
+  recordTrackPlayed,
   saveTrack,
   saveTrackWithStatus,
   setTrackLiked,
+  setPlaylistVisibility,
   upsertUser,
 } from "../src/lib/db";
 import type { TelegramUser } from "../src/lib/types";
@@ -108,4 +115,46 @@ test("a Telegram profile photo survives bot updates that omit it", () => {
   upsertUser({ ...user, photo_url: "https://example.com/avatar.jpg" });
   upsertUser(user);
   assert.equal(getLibrary(user).user.photoUrl, "https://example.com/avatar.jpg");
+});
+
+test("listening history records owned songs without duplicating history rows", () => {
+  const track = getLibrary(user).tracks[0];
+  assert.ok(track);
+
+  recordTrackPlayed(user, track.id);
+  recordTrackPlayed(user, track.id);
+
+  const history = getLibrary(user).recentlyPlayed;
+  assert.equal(history.filter((item) => item.id === track.id).length, 1);
+  assert.throws(() => recordTrackPlayed(user, "missing-track"), /not found/);
+});
+
+test("shared songs can be previewed and added without duplicate copies", () => {
+  const track = getLibrary(user).tracks[0];
+  assert.ok(track);
+  const shareId = createTrackShare(user, track.id);
+  const recipient: TelegramUser = { id: 67890, first_name: "Recipient" };
+
+  assert.equal(getSharedSongPreview(recipient, shareId)?.alreadyAdded, false);
+  assert.equal(importSharedSong(recipient, shareId).created, true);
+  assert.equal(importSharedSong(recipient, shareId).created, false);
+  assert.equal(getSharedSongPreview(recipient, shareId)?.alreadyAdded, true);
+  assert.equal(getLibrary(recipient).tracks.length, 1);
+});
+
+test("only public playlists can be opened from a share link", () => {
+  const track = getLibrary(user).tracks[0];
+  assert.ok(track);
+  const playlistId = createPlaylist(user, { name: "Shared playlist", description: "For testing" });
+  addTracksToPlaylist(user, playlistId, [track.id]);
+
+  assert.throws(() => createPlaylistShare(user, playlistId), /public/);
+  setPlaylistVisibility(user, playlistId, "public");
+  const shareId = createPlaylistShare(user, playlistId);
+  const preview = getSharedPlaylistPreview(shareId);
+  assert.equal(preview?.name, "Shared playlist");
+  assert.equal(preview?.trackCount, 1);
+
+  setPlaylistVisibility(user, playlistId, "private");
+  assert.equal(getSharedPlaylistPreview(shareId), null);
 });

@@ -19,11 +19,36 @@ export type Playlist = {
   name: string;
   description: string;
   kind: "standard" | "liked";
+  visibility: "private" | "public";
   createdAt: string;
   trackCount: number;
   duration: number;
   tracks: Track[];
 };
+
+export type SharedSongPreview = {
+  type: "song";
+  shareId: string;
+  title: string;
+  artist: string;
+  duration: number;
+  artworkSeed: number;
+  ownerName: string;
+  alreadyAdded: boolean;
+};
+
+export type SharedPlaylistPreview = {
+  type: "playlist";
+  shareId: string;
+  name: string;
+  description: string;
+  ownerName: string;
+  trackCount: number;
+  duration: number;
+  tracks: Array<Pick<Track, "title" | "artist" | "duration" | "artworkSeed">>;
+};
+
+export type SharedPreview = SharedSongPreview | SharedPlaylistPreview;
 
 export type LibraryPayload = {
   user: {
@@ -32,6 +57,7 @@ export type LibraryPayload = {
     photoUrl: string | null;
   };
   tracks: Track[];
+  recentlyPlayed: Track[];
   playlists: Playlist[];
   demo: boolean;
 };

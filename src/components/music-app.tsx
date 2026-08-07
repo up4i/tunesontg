@@ -1,10 +1,13 @@
 "use client";
 
 import {
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Check,
   ChevronDown,
   ChevronRight,
+  Globe2,
   Heart,
   House,
   Inbox,
@@ -12,6 +15,7 @@ import {
   ListMusic,
   ListPlus,
   LoaderCircle,
+  Lock,
   MonitorSmartphone,
   MoreHorizontal,
   Moon,
@@ -22,6 +26,7 @@ import {
   Repeat2,
   Search,
   Send,
+  Share2,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -33,7 +38,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { LibraryPayload, Playlist, Track } from "@/lib/types";
+import type { LibraryPayload, Playlist, SharedPreview, Track } from "@/lib/types";
 
 type Tab = "home" | "library" | "playlists";
 type ThemeMode = "telegram" | "light" | "dark";
@@ -182,6 +187,8 @@ function Skeleton() {
 export function MusicApp() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const historyRecordedTrackRef = useRef<string | null>(null);
+  const sharedParamHandledRef = useRef(false);
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -200,6 +207,10 @@ export function MusicApp() {
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [playerOpen, setPlayerOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
+  const [sharedLoading, setSharedLoading] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatOne, setRepeatOne] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -313,6 +324,25 @@ export function MusicApp() {
     return () => { document.body.style.overflow = previousOverflow; };
   }, [playerOpen]);
 
+  useEffect(() => {
+    if (!library || sharedParamHandledRef.current) return;
+    const token = window.Telegram?.WebApp.initDataUnsafe?.start_param
+      ?? new URLSearchParams(window.location.search).get("startapp")
+      ?? new URLSearchParams(window.location.search).get("tgWebAppStartParam");
+    if (!token || !/^[sp]_[a-f\d]{32}$/.test(token)) return;
+    sharedParamHandledRef.current = true;
+    const timer = window.setTimeout(() => {
+      setSharedLoading(true);
+      void api<SharedPreview>(`/api/shared/${token}`)
+        .then(setSharedPreview)
+        .catch((shareError) => {
+          setToast({ kind: "error", message: shareError instanceof Error ? shareError.message : "Could not open shared item." });
+        })
+        .finally(() => setSharedLoading(false));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [library]);
+
   const selectedPlaylist = library?.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
   const currentTrack = queue[queueIndex] ?? null;
   const filteredTracks = useMemo(() => {
@@ -340,6 +370,7 @@ export function MusicApp() {
     }
     setCurrentTime(0);
     setMediaDuration(track.duration);
+    historyRecordedTrackRef.current = null;
     if (autoplay) {
       void audio.play().catch(() => {
         setIsPlaying(false);
@@ -347,6 +378,17 @@ export function MusicApp() {
       });
     }
   }, []);
+
+  useEffect(() => {
+    if (!currentTrack || !isPlaying || historyRecordedTrackRef.current === currentTrack.id) return;
+    const duration = mediaDuration || currentTrack.duration;
+    const threshold = Math.min(15, Math.max(3, duration * 0.5));
+    if (currentTime < threshold) return;
+    historyRecordedTrackRef.current = currentTrack.id;
+    void api(`/api/tracks/${currentTrack.id}/played`, { method: "POST" })
+      .then(() => loadLibrary())
+      .catch(() => { historyRecordedTrackRef.current = null; });
+  }, [currentTime, currentTrack, isPlaying, loadLibrary, mediaDuration]);
 
   const playAt = useCallback((tracks: Track[], index: number) => {
     if (!tracks.length) return;
@@ -459,6 +501,77 @@ export function MusicApp() {
     haptic();
   }, [currentTrack, queue, shuffleEnabled]);
 
+  function playTrackNext(track: Track) {
+    if (!track.playable || !track.streamUrl) {
+      setToast({ kind: "error", message: "This track is not available for playback." });
+      return;
+    }
+    if (!currentTrack) {
+      startInAppQueue([track]);
+      return;
+    }
+    if (track.id === currentTrack.id) {
+      setToast({ kind: "success", message: "This song is already playing" });
+      return;
+    }
+    const nextQueue = queue.filter((item, index) => index === queueIndex || item.id !== track.id);
+    const currentIndex = nextQueue.findIndex((item) => item.id === currentTrack.id);
+    nextQueue.splice(currentIndex + 1, 0, track);
+    setQueue(nextQueue);
+    setQueueIndex(currentIndex);
+    setTrackMenu(null);
+    haptic();
+    setToast({ kind: "success", message: "Playing next" });
+  }
+
+  function moveQueueTrack(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= queue.length) return;
+    const activeId = currentTrack?.id;
+    const nextQueue = [...queue];
+    [nextQueue[index], nextQueue[target]] = [nextQueue[target], nextQueue[index]];
+    setQueue(nextQueue);
+    if (activeId) setQueueIndex(nextQueue.findIndex((track) => track.id === activeId));
+    haptic();
+  }
+
+  function removeQueueTrack(index: number) {
+    if (index < 0 || index >= queue.length) return;
+    if (queue.length === 1) {
+      clearQueue();
+      return;
+    }
+    const removingCurrent = index === queueIndex;
+    const nextQueue = queue.filter((_, itemIndex) => itemIndex !== index);
+    if (removingCurrent) {
+      const nextIndex = Math.min(index, nextQueue.length - 1);
+      setQueue(nextQueue);
+      setQueueIndex(nextIndex);
+      activateTrack(nextQueue[nextIndex]);
+    } else {
+      setQueue(nextQueue);
+      if (index < queueIndex) setQueueIndex((current) => current - 1);
+    }
+    haptic();
+  }
+
+  function clearQueue() {
+    const audio = audioRef.current;
+    audio?.pause();
+    audio?.removeAttribute("src");
+    audio?.load();
+    if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
+    setQueue([]);
+    setQueueIndex(0);
+    setCurrentTime(0);
+    setMediaDuration(0);
+    setIsPlaying(false);
+    setQueueOpen(false);
+    setPlayerOpen(false);
+    haptic();
+    setToast({ kind: "success", message: "Queue cleared" });
+  }
+
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
@@ -550,6 +663,83 @@ export function MusicApp() {
       setToast({ kind: "error", message: playError instanceof Error ? playError.message : "Could not send queue." });
     } finally {
       setSending(false);
+    }
+  }
+
+  async function openShareFlow(url: string, text: string) {
+    const webApp = window.Telegram?.WebApp;
+    if (webApp) {
+      webApp.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(url)}&text=${encodeURIComponent(text)}`);
+      return;
+    }
+    if (navigator.share) {
+      await navigator.share({ title: "tune", text, url });
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+    setToast({ kind: "success", message: "Share link copied" });
+  }
+
+  async function shareTrack(track: Track) {
+    setMutating(true);
+    try {
+      const result = await api<{ url: string }>(`/api/tracks/${track.id}/share`, { method: "POST" });
+      setTrackMenu(null);
+      haptic("success");
+      await openShareFlow(result.url, `Listen to “${track.title}” by ${track.artist} on tune.`);
+    } catch (shareError) {
+      if (shareError instanceof DOMException && shareError.name === "AbortError") return;
+      setToast({ kind: "error", message: shareError instanceof Error ? shareError.message : "Could not share song." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function updatePlaylistVisibility(playlist: Playlist) {
+    const visibility = playlist.visibility === "public" ? "private" : "public";
+    setMutating(true);
+    try {
+      await api(`/api/playlists/${playlist.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ visibility }),
+      });
+      await loadLibrary();
+      haptic("success");
+      setToast({ kind: "success", message: visibility === "public" ? "Playlist is now public" : "Playlist is now private" });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update visibility." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function sharePlaylist(playlist: Playlist) {
+    setMutating(true);
+    try {
+      const result = await api<{ url: string }>(`/api/playlists/${playlist.id}/share`, { method: "POST" });
+      haptic("success");
+      await openShareFlow(result.url, `Listen to ${playlist.name}, a playlist by ${library?.user.firstName ?? "a tune user"}.`);
+    } catch (shareError) {
+      if (shareError instanceof DOMException && shareError.name === "AbortError") return;
+      setToast({ kind: "error", message: shareError instanceof Error ? shareError.message : "Could not share playlist." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function addSharedSong() {
+    if (!sharedPreview || sharedPreview.type !== "song") return;
+    setMutating(true);
+    try {
+      const result = await api<{ created: boolean }>(`/api/shared/s_${sharedPreview.shareId}`, { method: "POST" });
+      await loadLibrary();
+      setSharedPreview(null);
+      haptic("success");
+      setToast({ kind: "success", message: result.created ? "Song added to your library" : "Song is already in your library" });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not add shared song." });
+    } finally {
+      setMutating(false);
     }
   }
 
@@ -745,6 +935,7 @@ export function MusicApp() {
               themeMode={themeMode}
               effectiveTheme={effectiveTheme}
               onThemeChange={cycleTheme}
+              onSeeHistory={() => setHistoryOpen(true)}
               onPlay={(track) => startInAppQueue(
                 library.tracks,
                 false,
@@ -795,7 +986,9 @@ export function MusicApp() {
               onMore={setTrackMenu}
               onAddMusic={() => setAddMusicPlaylistId(selectedPlaylist.id)}
               onDelete={() => setDeletePlaylistTarget(selectedPlaylist)}
-              sending={sending}
+              onVisibility={() => void updatePlaylistVisibility(selectedPlaylist)}
+              onShare={() => void sharePlaylist(selectedPlaylist)}
+              busy={sending || mutating}
             />
           ) : null}
 
@@ -836,6 +1029,46 @@ export function MusicApp() {
           onDelete={() => void removePlaylist(deletePlaylistTarget.id)}
         />
       ) : null}
+      {queueOpen && currentTrack ? (
+        <QueueSheet
+          queue={queue}
+          queueIndex={queueIndex}
+          onClose={() => setQueueOpen(false)}
+          onPlay={(index) => {
+            setQueueIndex(index);
+            activateTrack(queue[index]);
+          }}
+          onMove={moveQueueTrack}
+          onRemove={removeQueueTrack}
+          onClear={clearQueue}
+        />
+      ) : null}
+      {historyOpen && library ? (
+        <HistorySheet
+          tracks={library.recentlyPlayed}
+          onClose={() => setHistoryOpen(false)}
+          onPlay={(track) => {
+            setHistoryOpen(false);
+            startInAppQueue(
+              library.tracks,
+              false,
+              library.tracks.findIndex((item) => item.id === track.id),
+            );
+          }}
+          onMore={(track) => {
+            setHistoryOpen(false);
+            setTrackMenu(track);
+          }}
+        />
+      ) : null}
+      {sharedPreview ? (
+        <SharedItemSheet
+          preview={sharedPreview}
+          busy={mutating}
+          onClose={() => setSharedPreview(null)}
+          onAddSong={() => void addSharedSong()}
+        />
+      ) : null}
       {trackMenu && library ? (
         <TrackSheet
           track={trackMenu}
@@ -848,7 +1081,9 @@ export function MusicApp() {
             startInAppQueue([trackMenu]);
           }}
           onSendTelegram={() => { setTrackMenu(null); void sendQueue([trackMenu.id]); }}
+          onPlayNext={() => playTrackNext(trackMenu)}
           onToggleLiked={() => void toggleTrackLiked(trackMenu)}
+          onShare={() => void shareTrack(trackMenu)}
           onAdd={addToPlaylist}
           onRemove={selectedPlaylist && selectedPlaylist.kind === "standard"
             ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id)
@@ -879,11 +1114,13 @@ export function MusicApp() {
           onVolumeChange={changeVolume}
           onMuteToggle={toggleMute}
           onMore={() => setTrackMenu(currentTrack)}
+          onQueue={() => setQueueOpen(true)}
         />
       ) : null}
       {sending ? (
         <div className="sending-pill"><LoaderCircle className="spin" /> Preparing Telegram queue…</div>
       ) : null}
+      {sharedLoading ? <div className="sending-pill"><LoaderCircle className="spin" /> Opening shared music…</div> : null}
       {toast ? (
         <div className={`toast toast-${toast.kind}`}>
           {toast.kind === "success" ? <Check /> : <X />}
@@ -938,6 +1175,7 @@ function HomeScreen({
   themeMode,
   effectiveTheme,
   onThemeChange,
+  onSeeHistory,
   onPlay,
   onMore,
   onPlaylist,
@@ -949,6 +1187,7 @@ function HomeScreen({
   themeMode: ThemeMode;
   effectiveTheme: ResolvedTheme;
   onThemeChange: () => void;
+  onSeeHistory: () => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
   onPlaylist: (id: string) => void;
@@ -1008,6 +1247,18 @@ function HomeScreen({
           <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} />
         )) : <EmptyState title="Your music inbox is empty" copy="Send or forward an audio track to the bot and it will appear here." />}
       </section>
+
+      {library.recentlyPlayed.length ? (
+        <section className="section-block">
+          <div className="section-heading">
+            <div><p className="eyebrow">Listen again</p><h2>Recently played</h2></div>
+            <button onClick={onSeeHistory}>See all <ChevronRight /></button>
+          </div>
+          {library.recentlyPlayed.slice(0, 4).map((track) => (
+            <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} />
+          ))}
+        </section>
+      ) : null}
 
       <div className="telegram-note">
         <span><Send /></span>
@@ -1108,7 +1359,9 @@ function PlaylistDetail({
   onMore,
   onAddMusic,
   onDelete,
-  sending,
+  onVisibility,
+  onShare,
+  busy,
 }: {
   playlist: Playlist;
   onBack: () => void;
@@ -1118,7 +1371,9 @@ function PlaylistDetail({
   onMore: (track: Track) => void;
   onAddMusic: () => void;
   onDelete: () => void;
-  sending: boolean;
+  onVisibility: () => void;
+  onShare: () => void;
+  busy: boolean;
 }) {
   return (
     <main className="screen playlist-detail">
@@ -1130,13 +1385,24 @@ function PlaylistDetail({
         {playlist.description ? <p className="playlist-description">{playlist.description}</p> : null}
         <p className="playlist-stats">{playlist.trackCount} songs · {formatCollectionDuration(playlist.duration)}</p>
         <div className="playlist-actions">
-          <button className="secondary-button playlist-add-music" onClick={onAddMusic}><ListPlus /> Add music</button>
-          <button className="secondary-button" onClick={onShuffle} disabled={sending || !playlist.trackCount}><Shuffle /> Shuffle</button>
-          <button className="play-button" onClick={onPlay} disabled={sending || !playlist.trackCount}><Play fill="currentColor" /></button>
+          <button className="secondary-button playlist-add-music" onClick={onAddMusic} disabled={busy}><ListPlus /> Add music</button>
+          <button className="secondary-button" onClick={onShuffle} disabled={busy || !playlist.trackCount}><Shuffle /> Shuffle</button>
+          <button className="play-button" onClick={onPlay} disabled={busy || !playlist.trackCount}><Play fill="currentColor" /></button>
           {playlist.kind === "standard" ? (
-            <button className="playlist-delete" onClick={onDelete} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
+            <button className="playlist-delete" onClick={onDelete} disabled={busy} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
           ) : null}
         </div>
+        {playlist.kind === "standard" ? (
+          <div className="playlist-sharing-actions">
+            <button onClick={onVisibility} disabled={busy}>
+              {playlist.visibility === "public" ? <Globe2 /> : <Lock />}
+              {playlist.visibility === "public" ? "Public" : "Private"}
+            </button>
+            <button onClick={onShare} disabled={busy || playlist.visibility !== "public"} title={playlist.visibility === "private" ? "Make this playlist public to share it" : "Share playlist"}>
+              <Share2 /> Share
+            </button>
+          </div>
+        ) : null}
       </section>
       <section className="playlist-track-list">
         {playlist.tracks.length ? playlist.tracks.map((track, index) => (
@@ -1196,6 +1462,7 @@ function NowPlaying({
   onVolumeChange,
   onMuteToggle,
   onMore,
+  onQueue,
 }: {
   open: boolean;
   track: Track;
@@ -1218,6 +1485,7 @@ function NowPlaying({
   onVolumeChange: (volume: number) => void;
   onMuteToggle: () => void;
   onMore: () => void;
+  onQueue: () => void;
 }) {
   const [volumeOpen, setVolumeOpen] = useState(false);
   const safeDuration = Math.max(duration || 0, 0);
@@ -1269,6 +1537,12 @@ function NowPlaying({
           <button onClick={onNext} aria-label="Next track"><SkipForward fill="currentColor" /></button>
           <button className={repeatOne ? "active" : ""} onClick={onRepeat} aria-label="Repeat track"><Repeat2 /></button>
         </div>
+        <button className="queue-open-button" onClick={onQueue}>
+          <ListMusic />
+          <span>Open queue</span>
+          <strong>{queuePosition} of {queueLength}</strong>
+          <ChevronRight />
+        </button>
         <div className="player-utility-row">
           <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
           <div className={`volume-control ${volumeOpen ? "volume-control-open" : ""}`}>
@@ -1472,6 +1746,136 @@ function DeletePlaylistSheet({
   );
 }
 
+function QueueSheet({
+  queue,
+  queueIndex,
+  onClose,
+  onPlay,
+  onMove,
+  onRemove,
+  onClear,
+}: {
+  queue: Track[];
+  queueIndex: number;
+  onClose: () => void;
+  onPlay: (index: number) => void;
+  onMove: (index: number, direction: -1 | 1) => void;
+  onRemove: (index: number) => void;
+  onClear: () => void;
+}) {
+  return (
+    <Sheet onClose={onClose} title="Playback queue">
+      <div className="sheet-heading queue-heading">
+        <div><p className="eyebrow">{queue.length} {queue.length === 1 ? "song" : "songs"}</p><h2>Queue</h2></div>
+        <button className="icon-button" onClick={onClose} aria-label="Close queue"><X /></button>
+      </div>
+      <div className="queue-sheet-list">
+        {queue.map((track, index) => {
+          const active = index === queueIndex;
+          return (
+            <div className={`queue-sheet-row ${active ? "active" : ""}`} key={`${track.id}-${index}`}>
+              <button className="queue-track-main" onClick={() => onPlay(index)} disabled={active}>
+                <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />
+                <span>
+                  <strong>{track.title}</strong>
+                  <small>{active ? "Playing now" : `${track.artist} · ${formatDuration(track.duration)}`}</small>
+                </span>
+              </button>
+              <div className="queue-row-actions">
+                <button onClick={() => onMove(index, -1)} disabled={index === 0} aria-label={`Move ${track.title} up`}><ArrowUp /></button>
+                <button onClick={() => onMove(index, 1)} disabled={index === queue.length - 1} aria-label={`Move ${track.title} down`}><ArrowDown /></button>
+                <button className="queue-remove" onClick={() => onRemove(index)} aria-label={`Remove ${track.title} from queue`}><X /></button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <button className="clear-queue-button" onClick={onClear}><Trash2 /> Clear queue</button>
+    </Sheet>
+  );
+}
+
+function HistorySheet({
+  tracks,
+  onClose,
+  onPlay,
+  onMore,
+}: {
+  tracks: Track[];
+  onClose: () => void;
+  onPlay: (track: Track) => void;
+  onMore: (track: Track) => void;
+}) {
+  return (
+    <Sheet onClose={onClose} title="Listening history">
+      <div className="sheet-heading history-heading">
+        <div><p className="eyebrow">Listen again</p><h2>Recently played</h2></div>
+        <button className="icon-button" onClick={onClose} aria-label="Close history"><X /></button>
+      </div>
+      <div className="history-sheet-list">
+        {tracks.map((track) => (
+          <TrackRow
+            key={track.id}
+            track={track}
+            onPlay={() => onPlay(track)}
+            onMore={() => onMore(track)}
+          />
+        ))}
+      </div>
+    </Sheet>
+  );
+}
+
+function SharedItemSheet({
+  preview,
+  busy,
+  onClose,
+  onAddSong,
+}: {
+  preview: SharedPreview;
+  busy: boolean;
+  onClose: () => void;
+  onAddSong: () => void;
+}) {
+  if (preview.type === "song") {
+    return (
+      <Sheet onClose={onClose} title={`Shared song: ${preview.title}`}>
+        <div className="shared-item-heading">
+          <button className="icon-button" onClick={onClose} aria-label="Close shared song"><X /></button>
+          <Cover seed={preview.artworkSeed} size="large" label={preview.title} />
+          <p className="eyebrow">{preview.ownerName} sent you a song</p>
+          <h2>{preview.title}</h2>
+          <p>{preview.artist} · {formatDuration(preview.duration)}</p>
+        </div>
+        <button className="primary-button full-button" onClick={onAddSong} disabled={busy || preview.alreadyAdded}>
+          {busy ? <LoaderCircle className="spin" /> : preview.alreadyAdded ? <Check /> : <Plus />}
+          {preview.alreadyAdded ? "Already in your library" : "Add to my library"}
+        </button>
+      </Sheet>
+    );
+  }
+
+  return (
+    <Sheet onClose={onClose} title={`Shared playlist: ${preview.name}`}>
+      <div className="sheet-heading shared-playlist-heading">
+        <div><p className="eyebrow">Public playlist by {preview.ownerName}</p><h2>{preview.name}</h2></div>
+        <button className="icon-button" onClick={onClose} aria-label="Close shared playlist"><X /></button>
+      </div>
+      {preview.description ? <p className="shared-playlist-description">{preview.description}</p> : null}
+      <p className="shared-playlist-stats">{preview.trackCount} songs · {formatCollectionDuration(preview.duration)}</p>
+      <div className="shared-playlist-tracks">
+        {preview.tracks.map((track, index) => (
+          <div key={`${track.title}-${track.artist}-${index}`}>
+            <Cover seed={track.artworkSeed} size="small" label={track.title} />
+            <span><strong>{track.title}</strong><small>{track.artist}</small></span>
+            <em>{formatDuration(track.duration)}</em>
+          </div>
+        ))}
+      </div>
+    </Sheet>
+  );
+}
+
 function TrackSheet({
   track,
   playlists,
@@ -1480,7 +1884,9 @@ function TrackSheet({
   onClose,
   onPlayNow,
   onSendTelegram,
+  onPlayNext,
   onToggleLiked,
+  onShare,
   onAdd,
   onRemove,
   onNewPlaylist,
@@ -1492,7 +1898,9 @@ function TrackSheet({
   onClose: () => void;
   onPlayNow: () => void;
   onSendTelegram: () => void;
+  onPlayNext: () => void;
   onToggleLiked: () => void;
+  onShare: () => void;
   onAdd: (playlistId: string, trackId: string) => void;
   onRemove?: () => void;
   onNewPlaylist: () => void;
@@ -1506,11 +1914,13 @@ function TrackSheet({
         <button className="icon-button" onClick={onClose}><X /></button>
       </div>
       <button className="sheet-action play-now-action" onClick={onPlayNow} disabled={busy || !track.playable}><span><Play fill="currentColor" /></span><div><strong>Play now</strong><small>Listen here with full controls</small></div><ChevronRight /></button>
+      <button className="sheet-action queue-next-action" onClick={onPlayNext} disabled={busy || !track.playable}><span><ListPlus /></span><div><strong>Play next</strong><small>Put it after the current song</small></div><ChevronRight /></button>
       <button className={`sheet-action liked-action ${track.liked ? "liked" : ""}`} onClick={onToggleLiked} disabled={busy}>
         <span><Heart fill={track.liked ? "currentColor" : "none"} /></span>
         <div><strong>{track.liked ? "Remove from Liked Songs" : "Add to Liked Songs"}</strong><small>{track.liked ? "Keep the song in your library" : "Save it with your favorites"}</small></div>
         <ChevronRight />
       </button>
+      <button className="sheet-action share-action" onClick={onShare} disabled={busy}><span><Share2 /></span><div><strong>Share song</strong><small>Send a direct tune link</small></div><ChevronRight /></button>
       <button className="sheet-action" onClick={onSendTelegram} disabled={busy}><span><Send /></span><div><strong>Send to Telegram player</strong><small>Play it as an audio message in chat</small></div><ChevronRight /></button>
       {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from {currentPlaylist?.name}</strong><small>The song stays in your library</small></div><ChevronRight /></button> : null}
       <div className="sheet-divider" />

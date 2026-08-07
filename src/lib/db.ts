@@ -1,6 +1,13 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import type { LibraryPayload, Playlist, TelegramUser, Track } from "@/lib/types";
+import type {
+  LibraryPayload,
+  Playlist,
+  SharedPlaylistPreview,
+  SharedSongPreview,
+  TelegramUser,
+  Track,
+} from "@/lib/types";
 
 type UserRow = {
   id: string;
@@ -20,6 +27,8 @@ type TrackRow = {
   added_at: string;
   telegram_file_id: string;
   telegram_file_unique_id: string;
+  source_chat_id: string | null;
+  source_message_id: number | null;
   thumbnail_file_id: string | null;
   thumbnail_unique_id: string | null;
 };
@@ -29,6 +38,7 @@ type PlaylistRow = {
   name: string;
   description: string;
   kind: "standard" | "liked";
+  visibility: "private" | "public";
   created_at: string;
   track_count: number;
   duration: number;
@@ -70,6 +80,7 @@ function database(): Database.Database {
       file_size INTEGER,
       thumbnail_file_id TEXT,
       thumbnail_unique_id TEXT,
+      share_id TEXT,
       added_at TEXT NOT NULL,
       UNIQUE(owner_id, telegram_file_unique_id)
     );
@@ -80,6 +91,8 @@ function database(): Database.Database {
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       kind TEXT NOT NULL DEFAULT 'standard',
+      visibility TEXT NOT NULL DEFAULT 'private',
+      share_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -92,12 +105,22 @@ function database(): Database.Database {
       PRIMARY KEY(playlist_id, track_id)
     );
 
+    CREATE TABLE IF NOT EXISTS playback_history (
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+      last_played_at TEXT NOT NULL,
+      play_count INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(owner_id, track_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tracks_owner_added
       ON tracks(owner_id, added_at DESC);
     CREATE INDEX IF NOT EXISTS idx_playlists_owner_created
       ON playlists(owner_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_playlist_tracks_order
       ON playlist_tracks(playlist_id, position);
+    CREATE INDEX IF NOT EXISTS idx_playback_history_recent
+      ON playback_history(owner_id, last_played_at DESC);
   `);
 
   const trackColumns = db.pragma("table_info(tracks)") as Array<{ name: string }>;
@@ -107,6 +130,9 @@ function database(): Database.Database {
   if (!trackColumns.some((column) => column.name === "thumbnail_unique_id")) {
     db.exec("ALTER TABLE tracks ADD COLUMN thumbnail_unique_id TEXT");
   }
+  if (!trackColumns.some((column) => column.name === "share_id")) {
+    db.exec("ALTER TABLE tracks ADD COLUMN share_id TEXT");
+  }
   const userColumns = db.pragma("table_info(users)") as Array<{ name: string }>;
   if (!userColumns.some((column) => column.name === "photo_url")) {
     db.exec("ALTER TABLE users ADD COLUMN photo_url TEXT");
@@ -115,9 +141,19 @@ function database(): Database.Database {
   if (!playlistColumns.some((column) => column.name === "kind")) {
     db.exec("ALTER TABLE playlists ADD COLUMN kind TEXT NOT NULL DEFAULT 'standard'");
   }
+  if (!playlistColumns.some((column) => column.name === "visibility")) {
+    db.exec("ALTER TABLE playlists ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'");
+  }
+  if (!playlistColumns.some((column) => column.name === "share_id")) {
+    db.exec("ALTER TABLE playlists ADD COLUMN share_id TEXT");
+  }
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_owner_liked
       ON playlists(owner_id) WHERE kind = 'liked';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_share_id
+      ON tracks(share_id) WHERE share_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_share_id
+      ON playlists(share_id) WHERE share_id IS NOT NULL;
   `);
 
   global.__tunesDb = db;
@@ -298,6 +334,13 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     WHERE p.owner_id = ? AND p.kind = 'liked'
   `).all(owner.id) as Array<{ track_id: string }>;
   const likedIds = new Set(likedRows.map((row) => row.track_id));
+  const recentlyPlayedRows = db.prepare(`
+    SELECT t.* FROM playback_history h
+    JOIN tracks t ON t.id = h.track_id
+    WHERE h.owner_id = ?
+    ORDER BY h.last_played_at DESC
+    LIMIT 50
+  `).all(owner.id) as TrackRow[];
   const playlistRows = db.prepare(`
     SELECT p.*,
       COUNT(pt.track_id) AS track_count,
@@ -315,6 +358,7 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     name: row.name,
     description: row.description,
     kind: row.kind,
+    visibility: row.visibility,
     createdAt: row.created_at,
     trackCount: Number(row.track_count),
     duration: Number(row.duration),
@@ -324,6 +368,7 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
   return {
     user: { firstName: owner.first_name, username: owner.username, photoUrl: owner.photo_url },
     tracks: trackRows.map((row) => ({ ...toTrack(row), liked: likedIds.has(row.id) })),
+    recentlyPlayed: recentlyPlayedRows.map((row) => ({ ...toTrack(row), liked: likedIds.has(row.id) })),
     playlists,
     demo: trackRows.some((track) => track.telegram_file_id.startsWith("demo:")),
   };
@@ -420,6 +465,150 @@ export function setTrackLiked(user: TelegramUser, trackId: string, liked: boolea
     INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
     VALUES (?, ?, ?, ?)
   `).run(playlist.id, trackId, position.position, now());
+}
+
+export function recordTrackPlayed(user: TelegramUser, trackId: string): void {
+  const db = database();
+  const owner = upsertUser(user);
+  const track = db.prepare("SELECT 1 FROM tracks WHERE id = ? AND owner_id = ?")
+    .get(trackId, owner.id);
+  if (!track) throw new Error("Track was not found.");
+  db.prepare(`
+    INSERT INTO playback_history (owner_id, track_id, last_played_at, play_count)
+    VALUES (?, ?, ?, 1)
+    ON CONFLICT(owner_id, track_id) DO UPDATE SET
+      last_played_at = excluded.last_played_at,
+      play_count = playback_history.play_count + 1
+  `).run(owner.id, trackId, now());
+}
+
+function createShareId(): string {
+  return randomUUID().replaceAll("-", "");
+}
+
+export function createTrackShare(user: TelegramUser, trackId: string): string {
+  const db = database();
+  const owner = upsertUser(user);
+  db.prepare(`
+    UPDATE tracks SET share_id = COALESCE(share_id, ?)
+    WHERE id = ? AND owner_id = ?
+  `).run(createShareId(), trackId, owner.id);
+  const track = db.prepare("SELECT share_id FROM tracks WHERE id = ? AND owner_id = ?")
+    .get(trackId, owner.id) as { share_id: string | null } | undefined;
+  if (!track?.share_id) throw new Error("Track was not found.");
+  return track.share_id;
+}
+
+export function setPlaylistVisibility(
+  user: TelegramUser,
+  playlistId: string,
+  visibility: "private" | "public",
+): void {
+  const owner = upsertUser(user);
+  const result = database().prepare(`
+    UPDATE playlists SET visibility = ?, updated_at = ?
+    WHERE id = ? AND owner_id = ? AND kind = 'standard'
+  `).run(visibility, now(), playlistId, owner.id);
+  if (!result.changes) throw new Error("Playlist was not found.");
+}
+
+export function createPlaylistShare(user: TelegramUser, playlistId: string): string {
+  const db = database();
+  const owner = upsertUser(user);
+  const playlist = db.prepare(`
+    SELECT visibility FROM playlists
+    WHERE id = ? AND owner_id = ? AND kind = 'standard'
+  `).get(playlistId, owner.id) as { visibility: "private" | "public" } | undefined;
+  if (!playlist) throw new Error("Playlist was not found.");
+  if (playlist.visibility !== "public") throw new Error("Make this playlist public before sharing it.");
+  db.prepare(`
+    UPDATE playlists SET share_id = COALESCE(share_id, ?), updated_at = ?
+    WHERE id = ? AND owner_id = ?
+  `).run(createShareId(), now(), playlistId, owner.id);
+  const shared = db.prepare("SELECT share_id FROM playlists WHERE id = ? AND owner_id = ?")
+    .get(playlistId, owner.id) as { share_id: string };
+  return shared.share_id;
+}
+
+export function getSharedSongPreview(user: TelegramUser, shareId: string): SharedSongPreview | null {
+  const db = database();
+  const recipient = upsertUser(user);
+  const row = db.prepare(`
+    SELECT t.title, t.artist, t.duration, t.telegram_file_unique_id, u.first_name AS owner_name,
+      EXISTS(
+        SELECT 1 FROM tracks own
+        WHERE own.owner_id = ? AND own.telegram_file_unique_id = t.telegram_file_unique_id
+      ) AS already_added
+    FROM tracks t
+    JOIN users u ON u.id = t.owner_id
+    WHERE t.share_id = ?
+  `).get(recipient.id, shareId) as {
+    title: string;
+    artist: string;
+    duration: number;
+    telegram_file_unique_id: string;
+    owner_name: string;
+    already_added: number;
+  } | undefined;
+  return row ? {
+    type: "song",
+    shareId,
+    title: row.title,
+    artist: row.artist,
+    duration: row.duration,
+    artworkSeed: artworkSeed(row.telegram_file_unique_id),
+    ownerName: row.owner_name,
+    alreadyAdded: Boolean(row.already_added),
+  } : null;
+}
+
+export function importSharedSong(
+  user: TelegramUser,
+  shareId: string,
+): { track: Track; created: boolean } {
+  const row = database().prepare("SELECT * FROM tracks WHERE share_id = ?")
+    .get(shareId) as TrackRow | undefined;
+  if (!row) throw new Error("Shared song was not found.");
+  return saveTrackWithStatus(user, {
+    fileId: row.telegram_file_id,
+    fileUniqueId: row.telegram_file_unique_id,
+    sourceChatId: Number(row.source_chat_id ?? 0),
+    sourceMessageId: row.source_message_id ?? 0,
+    title: row.title,
+    artist: row.artist,
+    duration: row.duration,
+    mimeType: row.mime_type ?? undefined,
+    fileSize: row.file_size ?? undefined,
+    thumbnailFileId: row.thumbnail_file_id ?? undefined,
+    thumbnailUniqueId: row.thumbnail_unique_id ?? undefined,
+  });
+}
+
+export function getSharedPlaylistPreview(shareId: string): SharedPlaylistPreview | null {
+  const db = database();
+  const playlist = db.prepare(`
+    SELECT p.id, p.name, p.description, u.first_name AS owner_name
+    FROM playlists p
+    JOIN users u ON u.id = p.owner_id
+    WHERE p.share_id = ? AND p.visibility = 'public' AND p.kind = 'standard'
+  `).get(shareId) as {
+    id: string;
+    name: string;
+    description: string;
+    owner_name: string;
+  } | undefined;
+  if (!playlist) return null;
+  const tracks = tracksForPlaylist(playlist.id, new Set());
+  return {
+    type: "playlist",
+    shareId,
+    name: playlist.name,
+    description: playlist.description,
+    ownerName: playlist.owner_name,
+    trackCount: tracks.length,
+    duration: tracks.reduce((total, track) => total + track.duration, 0),
+    tracks: tracks.map(({ title, artist, duration, artworkSeed }) => ({ title, artist, duration, artworkSeed })),
+  };
 }
 
 export function removeTrackFromPlaylist(

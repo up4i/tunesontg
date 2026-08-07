@@ -5,6 +5,9 @@ declare global {
     Telegram?: {
       WebApp: {
         initData: string;
+        initDataUnsafe?: {
+          start_param?: string;
+        };
         version: string;
         colorScheme: "light" | "dark";
         ready(): void;

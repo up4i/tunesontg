@@ -29,6 +29,7 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({
       ...library,
       tracks: library.tracks.map(decorate),
+      recentlyPlayed: library.recentlyPlayed.map(decorate),
       playlists: library.playlists.map((playlist) => ({
         ...playlist,
         tracks: playlist.tracks.map(decorate),

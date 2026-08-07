@@ -969,6 +969,34 @@ button:disabled {
   width: 16px;
 }
 
+.playlist-sharing-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.playlist-sharing-actions button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: flex;
+  font-size: 9px;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 13px;
+}
+
+.playlist-sharing-actions button:first-child {
+  color: var(--lime);
+}
+
+.playlist-sharing-actions svg {
+  height: 13px;
+  width: 13px;
+}
+
 .play-button {
   align-items: center;
   background: var(--lime);
@@ -1398,6 +1426,46 @@ html[data-theme="light"] .bottom-nav button.active {
   width: 23px !important;
 }
 
+.queue-open-button {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 13px;
+  color: rgba(255, 255, 255, 0.72);
+  display: flex;
+  font-size: 10px;
+  margin-top: 17px;
+  min-height: 42px;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.queue-open-button > svg:first-child {
+  color: var(--lime);
+  height: 16px;
+  margin-right: 9px;
+  width: 16px;
+}
+
+.queue-open-button span {
+  flex: 1;
+  font-weight: 700;
+  text-align: left;
+}
+
+.queue-open-button strong {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.queue-open-button > svg:last-child {
+  color: rgba(255, 255, 255, 0.35);
+  height: 14px;
+  margin-left: 5px;
+  width: 14px;
+}
+
 .player-utility-row {
   align-items: center;
   display: flex;
@@ -1802,6 +1870,222 @@ html[data-theme="light"] .bottom-nav button.active {
   flex: 1;
 }
 
+.queue-heading {
+  margin-bottom: 12px;
+}
+
+.queue-sheet-list {
+  margin: 0 -5px;
+  max-height: min(58dvh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 5px;
+}
+
+.queue-sheet-row {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  min-height: 62px;
+  padding: 7px 0;
+}
+
+.queue-sheet-row.active {
+  background: rgba(214, 255, 87, 0.06);
+  border-radius: 11px;
+  padding-left: 6px;
+  padding-right: 4px;
+}
+
+.queue-track-main {
+  align-items: center;
+  background: transparent;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.queue-track-main:disabled {
+  opacity: 1;
+}
+
+.queue-track-main > span {
+  flex: 1;
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.queue-track-main strong,
+.queue-track-main small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-track-main strong {
+  font-size: 10px;
+  margin-bottom: 4px;
+}
+
+.queue-track-main small {
+  color: var(--subtle);
+  font-size: 8px;
+}
+
+.queue-sheet-row.active .queue-track-main small {
+  color: var(--lime);
+}
+
+.queue-row-actions {
+  align-items: center;
+  display: flex;
+  flex: none;
+}
+
+.queue-row-actions button {
+  align-items: center;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  height: 29px;
+  justify-content: center;
+  padding: 0;
+  width: 27px;
+}
+
+.queue-row-actions button svg {
+  height: 13px;
+  width: 13px;
+}
+
+.queue-row-actions .queue-remove {
+  color: #ff7878;
+}
+
+.clear-queue-button {
+  align-items: center;
+  background: transparent;
+  color: #ff7878;
+  display: flex;
+  font-size: 10px;
+  font-weight: 700;
+  gap: 7px;
+  justify-content: center;
+  margin-top: 13px;
+  min-height: 38px;
+  width: 100%;
+}
+
+.clear-queue-button svg {
+  height: 14px;
+  width: 14px;
+}
+
+.history-heading {
+  margin-bottom: 10px;
+}
+
+.history-sheet-list {
+  max-height: min(62dvh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.shared-item-heading {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  padding: 0 0 24px;
+  position: relative;
+  text-align: center;
+}
+
+.shared-item-heading > .icon-button {
+  position: absolute;
+  right: 0;
+  top: -8px;
+}
+
+.shared-item-heading > .cover {
+  margin-bottom: 20px;
+}
+
+.shared-item-heading h2 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.04em;
+  margin: 0;
+}
+
+.shared-item-heading > p:last-child {
+  color: var(--muted);
+  font-size: 10px;
+  margin: 8px 0 0;
+}
+
+.shared-playlist-heading {
+  margin-bottom: 8px;
+}
+
+.shared-playlist-description {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
+.shared-playlist-stats {
+  color: var(--subtle);
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  margin: 0 0 12px;
+  text-transform: uppercase;
+}
+
+.shared-playlist-tracks {
+  max-height: min(58dvh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.shared-playlist-tracks > div {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  min-height: 60px;
+  padding: 7px 0;
+}
+
+.shared-playlist-tracks > div > span {
+  flex: 1;
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.shared-playlist-tracks strong,
+.shared-playlist-tracks small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-playlist-tracks strong {
+  font-size: 10px;
+  margin-bottom: 4px;
+}
+
+.shared-playlist-tracks small,
+.shared-playlist-tracks em {
+  color: var(--subtle);
+  font-size: 8px;
+  font-style: normal;
+}
+
 .danger-button {
   align-items: center;
   background: #d95454;
@@ -1909,6 +2193,11 @@ html[data-theme="light"] .bottom-nav button.active {
   color: var(--lime);
 }
 
+.queue-next-action > span {
+  background: rgba(130, 169, 255, 0.12);
+  color: #82a9ff;
+}
+
 .liked-action > span {
   background: rgba(255, 102, 139, 0.12);
   color: #ff668b;
@@ -1917,6 +2206,11 @@ html[data-theme="light"] .bottom-nav button.active {
 .liked-action.liked > span {
   background: #ff668b;
   color: #251116;
+}
+
+.share-action > span {
+  background: rgba(93, 176, 255, 0.12);
+  color: #5db0ff;
 }
 
 .sheet-divider {
@@ -2195,6 +2489,10 @@ html[data-theme="light"] .bottom-nav button.active {
   }
 
   .player-utility-row {
+    margin-top: 10px;
+  }
+
+  .queue-open-button {
     margin-top: 10px;
   }
 }

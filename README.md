@@ -14,6 +14,8 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Playlist creation, searchable bulk add, remove, delete, play, and shuffle
 - A protected, default Liked Songs collection
 - Full now-playing UI with pause, seek, previous/next, repeat, and queue state
+- Editable queue with reorder, remove, clear, jump-to-track, and Play Next controls
+- Durable listening history with Recently Played
 - Telegram album-cover thumbnails when the incoming audio includes one
 - Stateless, Range-aware Telegram streaming for seeking without audio storage
 - Device/OS playback controls through the browser Media Session API where supported
@@ -21,6 +23,8 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Local demo library for designing and testing without a bot token
 - Webhook secret validation and user-scoped database queries
 - Duplicate Telegram-file detection with clear bot feedback
+- Direct song and public-playlist sharing through validated Mini App deep links
+- Recipient add-to-library prompts and public/private playlist controls
 
 ## Playback architecture
 
