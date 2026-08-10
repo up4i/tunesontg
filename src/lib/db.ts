@@ -37,6 +37,7 @@ type PlaylistRow = {
   id: string;
   name: string;
   description: string;
+  cover_seed: number | null;
   kind: "standard" | "liked";
   visibility: "private" | "public";
   created_at: string;
@@ -90,6 +91,7 @@ function database(): Database.Database {
       owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
+      cover_seed INTEGER,
       kind TEXT NOT NULL DEFAULT 'standard',
       visibility TEXT NOT NULL DEFAULT 'private',
       share_id TEXT,
@@ -113,6 +115,15 @@ function database(): Database.Database {
       PRIMARY KEY(owner_id, track_id)
     );
 
+    CREATE TABLE IF NOT EXISTS bug_reports (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      description TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_tracks_owner_added
       ON tracks(owner_id, added_at DESC);
     CREATE INDEX IF NOT EXISTS idx_playlists_owner_created
@@ -121,6 +132,8 @@ function database(): Database.Database {
       ON playlist_tracks(playlist_id, position);
     CREATE INDEX IF NOT EXISTS idx_playback_history_recent
       ON playback_history(owner_id, last_played_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_bug_reports_created
+      ON bug_reports(created_at DESC);
   `);
 
   const trackColumns = db.pragma("table_info(tracks)") as Array<{ name: string }>;
@@ -147,6 +160,9 @@ function database(): Database.Database {
   if (!playlistColumns.some((column) => column.name === "share_id")) {
     db.exec("ALTER TABLE playlists ADD COLUMN share_id TEXT");
   }
+  if (!playlistColumns.some((column) => column.name === "cover_seed")) {
+    db.exec("ALTER TABLE playlists ADD COLUMN cover_seed INTEGER");
+  }
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_owner_liked
       ON playlists(owner_id) WHERE kind = 'liked';
@@ -171,6 +187,10 @@ function artworkSeed(value: string): number {
     hash = Math.imul(hash, 16777619);
   }
   return Math.abs(hash) % 8;
+}
+
+function normalizeMetadata(value: string): string {
+  return value.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 function toTrack(row: TrackRow): Track {
@@ -229,12 +249,24 @@ export type IncomingTrack = {
 export function saveTrackWithStatus(
   user: TelegramUser,
   track: IncomingTrack,
-): { track: Track; created: boolean } {
+): { track: Track; created: boolean; possibleDuplicate: Track | null } {
   const db = database();
   const owner = upsertUser(user);
   const existing = db.prepare(`
     SELECT 1 FROM tracks WHERE owner_id = ? AND telegram_file_unique_id = ?
   `).get(owner.id, track.fileUniqueId);
+  const normalizedTitle = normalizeMetadata(track.title);
+  const normalizedArtist = normalizeMetadata(track.artist);
+  const possibleDuplicateRow = existing || !normalizedTitle || !normalizedArtist || track.duration <= 0
+    ? undefined
+    : (db.prepare(`
+      SELECT * FROM tracks
+      WHERE owner_id = ? AND duration > 0 AND ABS(duration - ?) <= 3
+      ORDER BY added_at DESC
+    `).all(owner.id, track.duration) as TrackRow[]).find((candidate) =>
+      normalizeMetadata(candidate.title) === normalizedTitle
+      && normalizeMetadata(candidate.artist) === normalizedArtist,
+    );
   db.prepare(`
     INSERT INTO tracks (
       id, owner_id, telegram_file_id, telegram_file_unique_id,
@@ -260,7 +292,11 @@ export function saveTrackWithStatus(
   const row = db.prepare(`
     SELECT * FROM tracks WHERE owner_id = ? AND telegram_file_unique_id = ?
   `).get(owner.id, track.fileUniqueId) as TrackRow;
-  return { track: toTrack(row), created: !existing };
+  return {
+    track: toTrack(row),
+    created: !existing,
+    possibleDuplicate: possibleDuplicateRow ? toTrack(possibleDuplicateRow) : null,
+  };
 }
 
 export function saveTrack(user: TelegramUser, track: IncomingTrack): Track {
@@ -357,6 +393,7 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     id: row.id,
     name: row.name,
     description: row.description,
+    coverSeed: row.cover_seed,
     kind: row.kind,
     visibility: row.visibility,
     createdAt: row.created_at,
@@ -386,6 +423,20 @@ export function createPlaylist(
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(id, owner.id, input.name, input.description ?? "", timestamp, timestamp);
   return id;
+}
+
+export function updatePlaylistDetails(
+  user: TelegramUser,
+  playlistId: string,
+  input: { name: string; description: string; coverSeed: number | null },
+): void {
+  const owner = upsertUser(user);
+  const result = database().prepare(`
+    UPDATE playlists
+    SET name = ?, description = ?, cover_seed = ?, updated_at = ?
+    WHERE id = ? AND owner_id = ? AND kind = 'standard'
+  `).run(input.name, input.description, input.coverSeed, now(), playlistId, owner.id);
+  if (!result.changes) throw new Error("Playlist was not found.");
 }
 
 export function addTrackToPlaylist(
@@ -445,26 +496,47 @@ export function deletePlaylist(user: TelegramUser, playlistId: string): void {
 }
 
 export function setTrackLiked(user: TelegramUser, trackId: string, liked: boolean): void {
+  setTracksLiked(user, [trackId], liked);
+}
+
+export function setTracksLiked(user: TelegramUser, trackIds: string[], liked: boolean): number {
   const db = database();
   const owner = upsertUser(user);
-  const track = db.prepare("SELECT 1 FROM tracks WHERE id = ? AND owner_id = ?")
-    .get(trackId, owner.id);
-  if (!track) throw new Error("Track was not found.");
+  const uniqueTrackIds = [...new Set(trackIds)];
+  if (!uniqueTrackIds.length) return 0;
+  const placeholders = uniqueTrackIds.map(() => "?").join(",");
+  const owned = db.prepare(`
+    SELECT id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+  `).all(owner.id, ...uniqueTrackIds) as Array<{ id: string }>;
+  if (owned.length !== uniqueTrackIds.length) throw new Error("One or more tracks were not found.");
   const playlist = db.prepare("SELECT id FROM playlists WHERE owner_id = ? AND kind = 'liked'")
     .get(owner.id) as { id: string };
   if (!liked) {
-    db.prepare("DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?")
-      .run(playlist.id, trackId);
-    return;
+    return Number(db.prepare(`
+      DELETE FROM playlist_tracks
+      WHERE playlist_id = ? AND track_id IN (${placeholders})
+    `).run(playlist.id, ...uniqueTrackIds).changes);
   }
   const position = db.prepare(`
     SELECT COALESCE(MAX(position), -1) + 1 AS position
     FROM playlist_tracks WHERE playlist_id = ?
   `).get(playlist.id) as { position: number };
-  db.prepare(`
+  const insert = db.prepare(`
     INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
     VALUES (?, ?, ?, ?)
-  `).run(playlist.id, trackId, position.position, now());
+  `);
+  return db.transaction(() => {
+    let nextPosition = position.position;
+    let changed = 0;
+    for (const trackId of uniqueTrackIds) {
+      const result = insert.run(playlist.id, trackId, nextPosition, now());
+      if (result.changes) {
+        nextPosition += 1;
+        changed += 1;
+      }
+    }
+    return changed;
+  })();
 }
 
 export function recordTrackPlayed(user: TelegramUser, trackId: string): void {
@@ -565,7 +637,7 @@ export function getSharedSongPreview(user: TelegramUser, shareId: string): Share
 export function importSharedSong(
   user: TelegramUser,
   shareId: string,
-): { track: Track; created: boolean } {
+): { track: Track; created: boolean; possibleDuplicate: Track | null } {
   const row = database().prepare("SELECT * FROM tracks WHERE share_id = ?")
     .get(shareId) as TrackRow | undefined;
   if (!row) throw new Error("Shared song was not found.");
@@ -616,14 +688,57 @@ export function removeTrackFromPlaylist(
   playlistId: string,
   trackId: string,
 ): void {
+  removeTracksFromPlaylist(user, playlistId, [trackId]);
+}
+
+export function removeTracksFromPlaylist(
+  user: TelegramUser,
+  playlistId: string,
+  trackIds: string[],
+): number {
   const db = database();
   const owner = upsertUser(user);
+  const uniqueTrackIds = [...new Set(trackIds)];
+  if (!uniqueTrackIds.length) return 0;
+  const placeholders = uniqueTrackIds.map(() => "?").join(",");
   const result = db.prepare(`
     DELETE FROM playlist_tracks
-    WHERE playlist_id = ? AND track_id = ?
+    WHERE playlist_id = ? AND track_id IN (${placeholders})
       AND playlist_id IN (SELECT id FROM playlists WHERE owner_id = ?)
-  `).run(playlistId, trackId, owner.id);
+  `).run(playlistId, ...uniqueTrackIds, owner.id);
   if (!result.changes) throw new Error("Playlist track was not found.");
+  return Number(result.changes);
+}
+
+export function deleteTracks(user: TelegramUser, trackIds: string[]): number {
+  const db = database();
+  const owner = upsertUser(user);
+  const uniqueTrackIds = [...new Set(trackIds)];
+  if (!uniqueTrackIds.length) return 0;
+  const placeholders = uniqueTrackIds.map(() => "?").join(",");
+  const owned = db.prepare(`
+    SELECT id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+  `).all(owner.id, ...uniqueTrackIds) as Array<{ id: string }>;
+  if (owned.length !== uniqueTrackIds.length) throw new Error("One or more tracks were not found.");
+  return Number(db.prepare(`
+    DELETE FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+  `).run(owner.id, ...uniqueTrackIds).changes);
+}
+
+export function createBugReport(
+  user: TelegramUser,
+  input: {
+    description: string;
+    context: Record<string, string | number | boolean | null>;
+  },
+): string {
+  const owner = upsertUser(user);
+  const id = randomUUID();
+  database().prepare(`
+    INSERT INTO bug_reports (id, owner_id, description, context_json, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, owner.id, input.description, JSON.stringify(input.context), now());
+  return id;
 }
 
 export type TelegramTrack = {

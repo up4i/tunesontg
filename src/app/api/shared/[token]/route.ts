@@ -41,7 +41,13 @@ export async function POST(
       return Response.json({ error: "Only shared songs can be added to your library." }, { status: 400 });
     }
     const result = importSharedSong(user, token.slice(2));
-    return Response.json({ created: result.created, trackId: result.track.id });
+    return Response.json({
+      created: result.created,
+      trackId: result.track.id,
+      possibleDuplicate: result.possibleDuplicate
+        ? { title: result.possibleDuplicate.title, artist: result.possibleDuplicate.artist }
+        : null,
+    });
   } catch (error) {
     const status = error instanceof AuthenticationError ? 401 : 404;
     return Response.json({ error: error instanceof Error ? error.message : "Could not add shared song." }, { status });

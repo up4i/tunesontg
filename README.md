@@ -11,7 +11,7 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Per-user libraries validated from signed Telegram Mini App `initData`
 - Searchable, responsive music UI with automatic Telegram light/dark themes and safe-area support
 - Telegram profile photos with an initial-based fallback
-- Playlist creation, searchable bulk add, remove, delete, play, and shuffle
+- Playlist creation, editable names/descriptions/preset covers, searchable bulk add, remove, delete, play, and shuffle
 - A protected, default Liked Songs collection
 - Full now-playing UI with pause, seek, previous/next, repeat, and queue state
 - Editable queue with reorder, remove, clear, jump-to-track, and Play Next controls
@@ -22,9 +22,13 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Optional native Telegram playback handoff through `sendAudio` / `sendMediaGroup`
 - Local demo library for designing and testing without a bot token
 - Webhook secret validation and user-scoped database queries
-- Duplicate Telegram-file detection with clear bot feedback
+- Exact Telegram-file duplicate prevention plus conservative title/artist/duration warnings
 - Direct song and public-playlist sharing through validated Mini App deep links
 - Recipient add-to-library prompts and public/private playlist controls
+- Library and playlist multi-select for bulk add, move, like, share, send, remove, and delete actions
+- Confirmed removal from My Library, with playlist/history cleanup and live-queue reconciliation
+- Capability-checked Telegram Home Screen shortcuts, native haptic feedback, and in-app bug reports
+- Branded UTYA loading states and desktop keyboard controls
 
 ## Playback architecture
 

@@ -18,6 +18,7 @@ export type Playlist = {
   id: string;
   name: string;
   description: string;
+  coverSeed: number | null;
   kind: "standard" | "liked";
   visibility: "private" | "public";
   createdAt: string;

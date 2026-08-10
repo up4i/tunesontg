@@ -3,7 +3,9 @@
 import {
   ArrowDown,
   ArrowLeft,
+  ArrowRight,
   ArrowUp,
+  Bug,
   Check,
   ChevronDown,
   ChevronRight,
@@ -21,6 +23,7 @@ import {
   Moon,
   Music2,
   Pause,
+  Pencil,
   Play,
   Plus,
   Repeat2,
@@ -114,6 +117,16 @@ function Cover({
 }
 
 function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?: boolean }) {
+  if (playlist.coverSeed !== null) {
+    return (
+      <div
+        className={`playlist-cover playlist-cover-custom cover-${playlist.coverSeed % 8} ${large ? "playlist-cover-large" : ""}`}
+        aria-label={`${playlist.name} cover`}
+      >
+        {playlist.kind === "liked" ? <Heart aria-hidden="true" /> : <Music2 aria-hidden="true" />}
+      </div>
+    );
+  }
   const tracks = playlist.tracks.slice(0, 4);
   const EmptyIcon = playlist.kind === "liked" ? Heart : Music2;
   const tiles: Array<Track | null> = tracks.length
@@ -139,24 +152,32 @@ function TrackRow({
   onPlay,
   onMore,
   ordinal,
+  selecting = false,
+  selected = false,
+  onSelect,
 }: {
   track: Track;
   onPlay: () => void;
   onMore: () => void;
   ordinal?: number;
+  selecting?: boolean;
+  selected?: boolean;
+  onSelect?: () => void;
 }) {
   return (
-    <div className="track-row">
-      <button className="track-main" onClick={onPlay} aria-label={`Play ${track.title}`}>
-        {ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />}
+    <div className={`track-row ${selected ? "track-row-selected" : ""}`}>
+      <button className="track-main" onClick={selecting ? onSelect : onPlay} aria-label={selecting ? `${selected ? "Deselect" : "Select"} ${track.title}` : `Play ${track.title}`}>
+        {selecting ? (
+          <span className={`selection-check ${selected ? "selected" : ""}`}>{selected ? <Check /> : null}</span>
+        ) : ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />}
         <span className="track-copy">
           <span className="track-title">{track.title}</span>
           <span className="track-artist">{track.artist}</span>
         </span>
       </button>
       <span className="track-duration">{formatDuration(track.duration)}</span>
-      <button className="icon-button track-more" onClick={onMore} aria-label={`More options for ${track.title}`}>
-        <MoreHorizontal aria-hidden="true" />
+      <button className="icon-button track-more" onClick={selecting ? onSelect : onMore} aria-label={selecting ? `Toggle selection for ${track.title}` : `More options for ${track.title}`}>
+        {selecting ? selected ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" /> : <MoreHorizontal aria-hidden="true" />}
       </button>
     </div>
   );
@@ -176,6 +197,10 @@ function EmptyState({ icon = "inbox", title, copy }: { icon?: "inbox" | "playlis
 function Skeleton() {
   return (
     <main className="screen loading-screen">
+      <div className="loading-brand">
+        <span className="brand-mark"><Music2 /></span>
+        <div><strong>UTYA</strong><small>Tuning your Telegram library…</small></div>
+      </div>
       <div className="skeleton skeleton-header" />
       <div className="skeleton skeleton-hero" />
       <div className="skeleton skeleton-heading" />
@@ -194,8 +219,12 @@ export function MusicApp() {
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editPlaylistTarget, setEditPlaylistTarget] = useState<Playlist | null>(null);
   const [addMusicPlaylistId, setAddMusicPlaylistId] = useState<string | null>(null);
+  const [bulkPlaylistOpen, setBulkPlaylistOpen] = useState(false);
   const [deletePlaylistTarget, setDeletePlaylistTarget] = useState<Playlist | null>(null);
+  const [deleteTrackTargets, setDeleteTrackTargets] = useState<Track[]>([]);
+  const [bugReportOpen, setBugReportOpen] = useState(false);
   const [trackMenu, setTrackMenu] = useState<Track | null>(null);
   const [sending, setSending] = useState(false);
   const [mutating, setMutating] = useState(false);
@@ -215,6 +244,9 @@ export function MusicApp() {
   const [repeatOne, setRepeatOne] = useState(false);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
+  const [canAddHomeScreen, setCanAddHomeScreen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "telegram";
     const saved = window.localStorage.getItem("tune:theme");
@@ -249,6 +281,13 @@ export function MusicApp() {
       }
       webApp?.ready();
       webApp?.expand();
+      const supportsHomeScreen = Boolean(webApp?.isVersionAtLeast("8.0") && webApp.addToHomeScreen);
+      setCanAddHomeScreen(supportsHomeScreen);
+      if (supportsHomeScreen && webApp?.checkHomeScreenStatus) {
+        webApp.checkHomeScreenStatus((status) => {
+          setCanAddHomeScreen(status === "missed" || status === "unknown");
+        });
+      }
       if (webApp?.isVersionAtLeast("6.1")) {
         const light = document.documentElement.dataset.theme === "light";
         webApp.setHeaderColor(light ? "#f8f6ef" : "#11110f");
@@ -298,6 +337,20 @@ export function MusicApp() {
   }, [effectiveTheme, themeMode]);
 
   useEffect(() => {
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp?.onEvent || !webApp.isVersionAtLeast("8.0")) return;
+    const added = () => {
+      setCanAddHomeScreen(false);
+      haptic("success");
+      setToast({ kind: "success", message: "tune was added to your Home Screen" });
+    };
+    webApp.onEvent("homeScreenAdded", added);
+    return () => {
+      webApp.offEvent?.("homeScreenAdded", added);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(null), 3500);
     return () => window.clearTimeout(timer);
@@ -344,6 +397,10 @@ export function MusicApp() {
   }, [library]);
 
   const selectedPlaylist = library?.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? null;
+  const selectedTracks = useMemo(() => {
+    const selected = new Set(selectedTrackIds);
+    return (library?.tracks ?? []).filter((track) => selected.has(track.id));
+  }, [library?.tracks, selectedTrackIds]);
   const currentTrack = queue[queueIndex] ?? null;
   const filteredTracks = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -588,10 +645,11 @@ export function MusicApp() {
         || target instanceof HTMLSelectElement
         || target?.isContentEditable
         || (input && input.type !== "range");
-      if (typing || target?.closest("button, a, [role='button']")) return;
+      if (typing) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
       if ((event.code === "Space" || event.key === " ") && currentTrack) {
+        if (target?.closest("button, a, [role='button']")) return;
         event.preventDefault();
         togglePlayback();
         return;
@@ -731,11 +789,18 @@ export function MusicApp() {
     if (!sharedPreview || sharedPreview.type !== "song") return;
     setMutating(true);
     try {
-      const result = await api<{ created: boolean }>(`/api/shared/s_${sharedPreview.shareId}`, { method: "POST" });
+      const result = await api<{ created: boolean; possibleDuplicate: { title: string; artist: string } | null }>(`/api/shared/s_${sharedPreview.shareId}`, { method: "POST" });
       await loadLibrary();
       setSharedPreview(null);
       haptic("success");
-      setToast({ kind: "success", message: result.created ? "Song added to your library" : "Song is already in your library" });
+      setToast({
+        kind: "success",
+        message: result.created
+          ? result.possibleDuplicate
+            ? `Song added. It may duplicate “${result.possibleDuplicate.title}” by ${result.possibleDuplicate.artist}.`
+            : "Song added to your library"
+          : "Song is already in your library",
+      });
     } catch (mutationError) {
       setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not add shared song." });
     } finally {
@@ -857,8 +922,229 @@ export function MusicApp() {
     }
   }
 
+  function clearSelection() {
+    setSelectionMode(false);
+    setSelectedTrackIds([]);
+    setBulkPlaylistOpen(false);
+  }
+
+  function toggleTrackSelection(trackId: string) {
+    haptic();
+    setSelectedTrackIds((current) => current.includes(trackId)
+      ? current.filter((id) => id !== trackId)
+      : [...current, trackId]);
+  }
+
+  function requestHomeScreen() {
+    const webApp = window.Telegram?.WebApp;
+    if (!webApp?.addToHomeScreen) {
+      setToast({ kind: "error", message: "Update Telegram to add this Mini App to your Home Screen." });
+      return;
+    }
+    haptic();
+    webApp.addToHomeScreen();
+  }
+
+  async function updatePlaylistDetails(
+    playlist: Playlist,
+    details: { name: string; description: string; coverSeed: number | null },
+  ) {
+    setMutating(true);
+    try {
+      await api(`/api/playlists/${playlist.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(details),
+      });
+      await loadLibrary();
+      setEditPlaylistTarget(null);
+      haptic("success");
+      setToast({ kind: "success", message: "Playlist updated" });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update playlist." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function setSelectedLiked(liked: boolean) {
+    if (!selectedTrackIds.length) return;
+    setMutating(true);
+    try {
+      await api("/api/tracks/like", {
+        method: "PUT",
+        body: JSON.stringify({ trackIds: selectedTrackIds, liked }),
+      });
+      const selected = new Set(selectedTrackIds);
+      setQueue((current) => current.map((track) => selected.has(track.id) ? { ...track, liked } : track));
+      await loadLibrary();
+      clearSelection();
+      haptic("success");
+      setToast({ kind: "success", message: liked ? "Added to Liked Songs" : "Removed from Liked Songs" });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update Liked Songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function shareSelectedTracks() {
+    if (!selectedTracks.length) return;
+    if (selectedTracks.length > 10) {
+      setToast({ kind: "error", message: "Choose up to 10 songs to share at once." });
+      return;
+    }
+    setMutating(true);
+    try {
+      const result = await api<{ urls: string[] }>("/api/tracks/share", {
+        method: "POST",
+        body: JSON.stringify({ trackIds: selectedTracks.map((track) => track.id) }),
+      });
+      const [firstUrl, ...otherUrls] = result.urls;
+      const trackList = selectedTracks.map((track) => `${track.title} — ${track.artist}`).join("\n");
+      const extraLinks = otherUrls.length ? `\n\n${otherUrls.join("\n")}` : "";
+      await openShareFlow(firstUrl, `Music from tune:\n${trackList}${extraLinks}`);
+      clearSelection();
+      haptic("success");
+    } catch (shareError) {
+      if (shareError instanceof DOMException && shareError.name === "AbortError") return;
+      haptic("error");
+      setToast({ kind: "error", message: shareError instanceof Error ? shareError.message : "Could not share songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function organizeSelectedTracks(targetPlaylistId: string, move: boolean) {
+    if (!selectedTrackIds.length) return;
+    setMutating(true);
+    try {
+      const result = await api<{ added: number }>(`/api/playlists/${targetPlaylistId}/tracks`, {
+        method: "POST",
+        body: JSON.stringify({ trackIds: selectedTrackIds }),
+      });
+      if (move && selectedPlaylist?.kind === "standard" && selectedPlaylist.id !== targetPlaylistId) {
+        await api(`/api/playlists/${selectedPlaylist.id}/tracks`, {
+          method: "DELETE",
+          body: JSON.stringify({ trackIds: selectedTrackIds }),
+        });
+      }
+      await loadLibrary();
+      clearSelection();
+      haptic("success");
+      setToast({
+        kind: "success",
+        message: move ? "Songs moved to playlist" : result.added ? "Songs added to playlist" : "Songs were already in that playlist",
+      });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not organize songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function removeSelectedFromPlaylist() {
+    if (!selectedTrackIds.length || selectedPlaylist?.kind !== "standard") return;
+    setMutating(true);
+    try {
+      await api(`/api/playlists/${selectedPlaylist.id}/tracks`, {
+        method: "DELETE",
+        body: JSON.stringify({ trackIds: selectedTrackIds }),
+      });
+      await loadLibrary();
+      clearSelection();
+      haptic("success");
+      setToast({ kind: "success", message: "Songs removed from playlist" });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not remove songs." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function deleteLibraryTracks(tracks: Track[]) {
+    const trackIds = tracks.map((track) => track.id);
+    if (!trackIds.length) return;
+    setMutating(true);
+    try {
+      await api("/api/tracks", {
+        method: "DELETE",
+        body: JSON.stringify({ trackIds }),
+      });
+      const deleted = new Set(trackIds);
+      const nextQueue = queue.filter((track) => !deleted.has(track.id));
+      if (currentTrack && deleted.has(currentTrack.id)) {
+        if (nextQueue.length) {
+          const nextIndex = Math.min(queueIndex, nextQueue.length - 1);
+          setQueue(nextQueue);
+          setQueueIndex(nextIndex);
+          activateTrack(nextQueue[nextIndex], isPlaying);
+        } else {
+          const audio = audioRef.current;
+          audio?.pause();
+          audio?.removeAttribute("src");
+          audio?.load();
+          setQueue([]);
+          setQueueIndex(0);
+          setCurrentTime(0);
+          setMediaDuration(0);
+          setIsPlaying(false);
+          setQueueOpen(false);
+          setPlayerOpen(false);
+          if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
+        }
+      } else {
+        setQueue(nextQueue);
+        if (currentTrack) setQueueIndex(Math.max(0, nextQueue.findIndex((track) => track.id === currentTrack.id)));
+      }
+      await loadLibrary();
+      setDeleteTrackTargets([]);
+      setTrackMenu(null);
+      clearSelection();
+      haptic("success");
+      setToast({ kind: "success", message: tracks.length === 1 ? "Song removed from My Library" : `${tracks.length} songs removed from My Library` });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not remove songs from your library." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  async function submitBugReport(description: string) {
+    setMutating(true);
+    try {
+      const webApp = window.Telegram?.WebApp;
+      await api("/api/bug-reports", {
+        method: "POST",
+        body: JSON.stringify({
+          description,
+          context: {
+            platform: webApp?.platform ?? "web",
+            telegramVersion: webApp?.version ?? "unknown",
+            colorScheme: effectiveTheme,
+            viewport: `${window.innerWidth}x${window.innerHeight}`,
+            userAgent: navigator.userAgent,
+          },
+        }),
+      });
+      setBugReportOpen(false);
+      haptic("success");
+      setToast({ kind: "success", message: "Bug report sent. Thank you." });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not send the bug report." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
   function switchTab(next: Tab) {
     haptic();
+    clearSelection();
     setTab(next);
     setSelectedPlaylistId(null);
     setSearch("");
@@ -935,6 +1221,9 @@ export function MusicApp() {
               themeMode={themeMode}
               effectiveTheme={effectiveTheme}
               onThemeChange={cycleTheme}
+              onReportBug={() => setBugReportOpen(true)}
+              canAddHomeScreen={canAddHomeScreen}
+              onAddHomeScreen={requestHomeScreen}
               onSeeHistory={() => setHistoryOpen(true)}
               onPlay={(track) => startInAppQueue(
                 library.tracks,
@@ -963,6 +1252,11 @@ export function MusicApp() {
               onMore={setTrackMenu}
               onShuffle={() => startInAppQueue(library.tracks, true)}
               sending={sending}
+              selecting={selectionMode}
+              selectedIds={selectedTrackIds}
+              onStartSelecting={() => setSelectionMode(true)}
+              onCancelSelecting={clearSelection}
+              onSelect={toggleTrackSelection}
             />
           ) : null}
           {tab === "playlists" && !selectedPlaylist ? (
@@ -975,7 +1269,7 @@ export function MusicApp() {
           {tab === "playlists" && selectedPlaylist ? (
             <PlaylistDetail
               playlist={selectedPlaylist}
-              onBack={() => setSelectedPlaylistId(null)}
+              onBack={() => { clearSelection(); setSelectedPlaylistId(null); }}
               onPlay={() => startInAppQueue(selectedPlaylist.tracks)}
               onShuffle={() => startInAppQueue(selectedPlaylist.tracks, true)}
               onTrackPlay={(track) => startInAppQueue(
@@ -985,13 +1279,33 @@ export function MusicApp() {
               )}
               onMore={setTrackMenu}
               onAddMusic={() => setAddMusicPlaylistId(selectedPlaylist.id)}
+              onEdit={() => setEditPlaylistTarget(selectedPlaylist)}
               onDelete={() => setDeletePlaylistTarget(selectedPlaylist)}
               onVisibility={() => void updatePlaylistVisibility(selectedPlaylist)}
               onShare={() => void sharePlaylist(selectedPlaylist)}
               busy={sending || mutating}
+              selecting={selectionMode}
+              selectedIds={selectedTrackIds}
+              onStartSelecting={() => setSelectionMode(true)}
+              onCancelSelecting={clearSelection}
+              onSelect={toggleTrackSelection}
             />
           ) : null}
 
+          {selectionMode ? (
+            <SelectionToolbar
+              tracks={selectedTracks}
+              currentPlaylist={selectedPlaylist}
+              busy={mutating || sending}
+              onClose={clearSelection}
+              onOrganize={() => setBulkPlaylistOpen(true)}
+              onLike={() => void setSelectedLiked(!selectedTracks.every((track) => track.liked))}
+              onShare={() => void shareSelectedTracks()}
+              onSend={() => void sendQueue(selectedTrackIds)}
+              onRemove={selectedPlaylist?.kind === "standard" ? () => void removeSelectedFromPlaylist() : undefined}
+              onDelete={() => setDeleteTrackTargets(selectedTracks)}
+            />
+          ) : null}
           <BottomNav tab={tab} onSelect={switchTab} />
           {currentTrack ? (
             <MiniPlayer
@@ -1012,6 +1326,14 @@ export function MusicApp() {
           onCreate={(name, description) => void createPlaylist(name, description)}
         />
       ) : null}
+      {editPlaylistTarget ? (
+        <EditPlaylistSheet
+          playlist={editPlaylistTarget}
+          busy={mutating}
+          onClose={() => setEditPlaylistTarget(null)}
+          onSave={(details) => void updatePlaylistDetails(editPlaylistTarget, details)}
+        />
+      ) : null}
       {addMusicPlaylistId && library ? (
         <AddMusicSheet
           playlist={library.playlists.find((playlist) => playlist.id === addMusicPlaylistId) ?? null}
@@ -1027,6 +1349,32 @@ export function MusicApp() {
           busy={mutating}
           onClose={() => setDeletePlaylistTarget(null)}
           onDelete={() => void removePlaylist(deletePlaylistTarget.id)}
+        />
+      ) : null}
+      {bulkPlaylistOpen && library ? (
+        <BulkPlaylistSheet
+          tracks={selectedTracks}
+          playlists={library.playlists.filter((playlist) => playlist.kind === "standard")}
+          currentPlaylist={selectedPlaylist?.kind === "standard" ? selectedPlaylist : null}
+          busy={mutating}
+          onClose={() => setBulkPlaylistOpen(false)}
+          onApply={(playlistId, move) => void organizeSelectedTracks(playlistId, move)}
+          onCreate={() => { setBulkPlaylistOpen(false); setCreateOpen(true); }}
+        />
+      ) : null}
+      {deleteTrackTargets.length ? (
+        <DeleteTracksSheet
+          tracks={deleteTrackTargets}
+          busy={mutating}
+          onClose={() => setDeleteTrackTargets([])}
+          onDelete={() => void deleteLibraryTracks(deleteTrackTargets)}
+        />
+      ) : null}
+      {bugReportOpen ? (
+        <BugReportSheet
+          busy={mutating}
+          onClose={() => setBugReportOpen(false)}
+          onSubmit={(description) => void submitBugReport(description)}
         />
       ) : null}
       {queueOpen && currentTrack ? (
@@ -1088,6 +1436,7 @@ export function MusicApp() {
           onRemove={selectedPlaylist && selectedPlaylist.kind === "standard"
             ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id)
             : undefined}
+          onRemoveLibrary={() => { setTrackMenu(null); setDeleteTrackTargets([trackMenu]); }}
           onNewPlaylist={() => { setTrackMenu(null); setCreateOpen(true); }}
         />
       ) : null}
@@ -1137,6 +1486,9 @@ function Header({
   themeMode,
   effectiveTheme,
   onThemeChange,
+  onReportBug,
+  canAddHomeScreen,
+  onAddHomeScreen,
   subtitle = "Your music, right here.",
 }: {
   name: string;
@@ -1144,6 +1496,9 @@ function Header({
   themeMode: ThemeMode;
   effectiveTheme: ResolvedTheme;
   onThemeChange: () => void;
+  onReportBug: () => void;
+  canAddHomeScreen: boolean;
+  onAddHomeScreen: () => void;
   subtitle?: string;
 }) {
   const ThemeIcon = themeMode === "telegram"
@@ -1159,6 +1514,14 @@ function Header({
         <p>{subtitle}</p>
       </div>
       <div className="topbar-actions">
+        <button className="theme-toggle" onClick={onReportBug} aria-label="Report a bug" title="Report a bug">
+          <Bug />
+        </button>
+        {canAddHomeScreen ? (
+          <button className="theme-toggle" onClick={onAddHomeScreen} aria-label="Add tune to Home Screen" title="Add to Home Screen">
+            <Plus />
+          </button>
+        ) : null}
         <button className="theme-toggle" onClick={onThemeChange} aria-label={`Theme: ${themeLabel}. Change theme`} title={`Theme: ${themeLabel}`}>
           <ThemeIcon />
         </button>
@@ -1175,6 +1538,9 @@ function HomeScreen({
   themeMode,
   effectiveTheme,
   onThemeChange,
+  onReportBug,
+  canAddHomeScreen,
+  onAddHomeScreen,
   onSeeHistory,
   onPlay,
   onMore,
@@ -1187,6 +1553,9 @@ function HomeScreen({
   themeMode: ThemeMode;
   effectiveTheme: ResolvedTheme;
   onThemeChange: () => void;
+  onReportBug: () => void;
+  canAddHomeScreen: boolean;
+  onAddHomeScreen: () => void;
   onSeeHistory: () => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
@@ -1207,6 +1576,9 @@ function HomeScreen({
         themeMode={themeMode}
         effectiveTheme={effectiveTheme}
         onThemeChange={onThemeChange}
+        onReportBug={onReportBug}
+        canAddHomeScreen={canAddHomeScreen}
+        onAddHomeScreen={onAddHomeScreen}
       />
 
       <section className="welcome-block">
@@ -1278,6 +1650,11 @@ function LibraryScreen({
   onMore,
   onShuffle,
   sending,
+  selecting,
+  selectedIds,
+  onStartSelecting,
+  onCancelSelecting,
+  onSelect,
 }: {
   searchInputRef: React.RefObject<HTMLInputElement | null>;
   tracks: Track[];
@@ -1288,12 +1665,22 @@ function LibraryScreen({
   onMore: (track: Track) => void;
   onShuffle: () => void;
   sending: boolean;
+  selecting: boolean;
+  selectedIds: string[];
+  onStartSelecting: () => void;
+  onCancelSelecting: () => void;
+  onSelect: (trackId: string) => void;
 }) {
   return (
     <main className="screen library-screen">
       <div className="page-heading">
         <div><p className="eyebrow">Your collection</p><h1>Library</h1></div>
-        <button className="round-action" onClick={onShuffle} disabled={sending || !total} aria-label="Shuffle library"><Shuffle /></button>
+        <div className="page-heading-actions">
+          <button className="text-action" onClick={selecting ? onCancelSelecting : onStartSelecting} disabled={!total}>
+            {selecting ? "Done" : "Select"}
+          </button>
+          <button className="round-action" onClick={onShuffle} disabled={sending || !total || selecting} aria-label="Shuffle library"><Shuffle /></button>
+        </div>
       </div>
       <label className="search-box">
         <Search aria-hidden="true" />
@@ -1310,7 +1697,15 @@ function LibraryScreen({
       <div className="list-meta"><span>{search ? `${tracks.length} found` : `${total} songs`}</span><span>Recently added</span></div>
       <div className="track-list">
         {tracks.length ? tracks.map((track) => (
-          <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} />
+          <TrackRow
+            key={track.id}
+            track={track}
+            onPlay={() => onPlay(track)}
+            onMore={() => onMore(track)}
+            selecting={selecting}
+            selected={selectedIds.includes(track.id)}
+            onSelect={() => onSelect(track.id)}
+          />
         )) : (
           <EmptyState title={search ? "Nothing found" : "No songs yet"} copy={search ? "Try a different song or artist." : "Send an audio file to the bot to start your library."} />
         )}
@@ -1358,10 +1753,16 @@ function PlaylistDetail({
   onTrackPlay,
   onMore,
   onAddMusic,
+  onEdit,
   onDelete,
   onVisibility,
   onShare,
   busy,
+  selecting,
+  selectedIds,
+  onStartSelecting,
+  onCancelSelecting,
+  onSelect,
 }: {
   playlist: Playlist;
   onBack: () => void;
@@ -1370,10 +1771,16 @@ function PlaylistDetail({
   onTrackPlay: (track: Track) => void;
   onMore: (track: Track) => void;
   onAddMusic: () => void;
+  onEdit: () => void;
   onDelete: () => void;
   onVisibility: () => void;
   onShare: () => void;
   busy: boolean;
+  selecting: boolean;
+  selectedIds: string[];
+  onStartSelecting: () => void;
+  onCancelSelecting: () => void;
+  onSelect: (trackId: string) => void;
 }) {
   return (
     <main className="screen playlist-detail">
@@ -1385,15 +1792,16 @@ function PlaylistDetail({
         {playlist.description ? <p className="playlist-description">{playlist.description}</p> : null}
         <p className="playlist-stats">{playlist.trackCount} songs · {formatCollectionDuration(playlist.duration)}</p>
         <div className="playlist-actions">
-          <button className="secondary-button playlist-add-music" onClick={onAddMusic} disabled={busy}><ListPlus /> Add music</button>
-          <button className="secondary-button" onClick={onShuffle} disabled={busy || !playlist.trackCount}><Shuffle /> Shuffle</button>
-          <button className="play-button" onClick={onPlay} disabled={busy || !playlist.trackCount}><Play fill="currentColor" /></button>
+          {playlist.kind === "standard" ? <button className="secondary-button playlist-add-music" onClick={onAddMusic} disabled={busy || selecting}><ListPlus /> Add music</button> : null}
+          <button className="secondary-button" onClick={onShuffle} disabled={busy || selecting || !playlist.trackCount}><Shuffle /> Shuffle</button>
+          <button className="play-button" onClick={onPlay} disabled={busy || selecting || !playlist.trackCount}><Play fill="currentColor" /></button>
           {playlist.kind === "standard" ? (
             <button className="playlist-delete" onClick={onDelete} disabled={busy} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
           ) : null}
         </div>
         {playlist.kind === "standard" ? (
           <div className="playlist-sharing-actions">
+            <button onClick={onEdit} disabled={busy}><Pencil /> Edit</button>
             <button onClick={onVisibility} disabled={busy}>
               {playlist.visibility === "public" ? <Globe2 /> : <Lock />}
               {playlist.visibility === "public" ? "Public" : "Private"}
@@ -1403,10 +1811,24 @@ function PlaylistDetail({
             </button>
           </div>
         ) : null}
+        {playlist.trackCount ? (
+          <button className="playlist-select-action" onClick={selecting ? onCancelSelecting : onStartSelecting} disabled={busy}>
+            {selecting ? <X /> : <Check />} {selecting ? "Cancel selection" : "Select songs"}
+          </button>
+        ) : null}
       </section>
       <section className="playlist-track-list">
         {playlist.tracks.length ? playlist.tracks.map((track, index) => (
-          <TrackRow key={track.id} track={track} ordinal={index + 1} onPlay={() => onTrackPlay(track)} onMore={() => onMore(track)} />
+          <TrackRow
+            key={track.id}
+            track={track}
+            ordinal={index + 1}
+            onPlay={() => onTrackPlay(track)}
+            onMore={() => onMore(track)}
+            selecting={selecting}
+            selected={selectedIds.includes(track.id)}
+            onSelect={() => onSelect(track.id)}
+          />
         )) : <EmptyState title="This playlist is waiting" copy="Use Add music to choose songs from your library." />}
       </section>
     </main>
@@ -1602,6 +2024,49 @@ function BottomNav({ tab, onSelect }: { tab: Tab; onSelect: (tab: Tab) => void }
   );
 }
 
+function SelectionToolbar({
+  tracks,
+  currentPlaylist,
+  busy,
+  onClose,
+  onOrganize,
+  onLike,
+  onShare,
+  onSend,
+  onRemove,
+  onDelete,
+}: {
+  tracks: Track[];
+  currentPlaylist: Playlist | null;
+  busy: boolean;
+  onClose: () => void;
+  onOrganize: () => void;
+  onLike: () => void;
+  onShare: () => void;
+  onSend: () => void;
+  onRemove?: () => void;
+  onDelete: () => void;
+}) {
+  const selectedCount = tracks.length;
+  const allLiked = selectedCount > 0 && tracks.every((track) => track.liked);
+  return (
+    <aside className="selection-toolbar" aria-label="Selected song actions">
+      <div className="selection-toolbar-heading">
+        <strong>{selectedCount ? `${selectedCount} selected` : "Select songs"}</strong>
+        <button onClick={onClose} aria-label="Cancel selection"><X /></button>
+      </div>
+      <div className="selection-actions">
+        <button onClick={onOrganize} disabled={busy || !selectedCount}><ListPlus /><span>{currentPlaylist?.kind === "standard" ? "Add / move" : "Add to"}</span></button>
+        <button onClick={onLike} disabled={busy || !selectedCount}><Heart fill={allLiked ? "currentColor" : "none"} /><span>{allLiked ? "Unlike" : "Like"}</span></button>
+        <button onClick={onShare} disabled={busy || !selectedCount || selectedCount > 10} title={selectedCount > 10 ? "Share up to 10 songs at once" : "Share songs"}><Share2 /><span>Share</span></button>
+        <button onClick={onSend} disabled={busy || !selectedCount}><Send /><span>Telegram</span></button>
+        {onRemove ? <button onClick={onRemove} disabled={busy || !selectedCount}><X /><span>Remove</span></button> : null}
+        <button className="destructive" onClick={onDelete} disabled={busy || !selectedCount}><Trash2 /><span>Delete</span></button>
+      </div>
+    </aside>
+  );
+}
+
 function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   return (
     <div className="sheet-layer" role="dialog" aria-modal="true" aria-label={title}>
@@ -1625,6 +2090,154 @@ function CreatePlaylistSheet({ busy, onClose, onCreate }: { busy: boolean; onClo
         <label><span>Description <em>optional</em></span><textarea maxLength={160} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What does this playlist feel like?" rows={3} /></label>
         <button className="primary-button full-button" type="submit" disabled={!name.trim() || busy}>
           {busy ? <LoaderCircle className="spin" /> : <Plus />} Create playlist
+        </button>
+      </form>
+    </Sheet>
+  );
+}
+
+function EditPlaylistSheet({
+  playlist,
+  busy,
+  onClose,
+  onSave,
+}: {
+  playlist: Playlist;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (details: { name: string; description: string; coverSeed: number | null }) => void;
+}) {
+  const [name, setName] = useState(playlist.name);
+  const [description, setDescription] = useState(playlist.description);
+  const [coverSeed, setCoverSeed] = useState<number | null>(playlist.coverSeed);
+  const changed = name.trim() !== playlist.name
+    || description.trim() !== playlist.description
+    || coverSeed !== playlist.coverSeed;
+  return (
+    <Sheet onClose={onClose} title={`Edit ${playlist.name}`}>
+      <div className="sheet-heading"><div><p className="eyebrow">Playlist details</p><h2>Edit playlist</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <form
+        className="playlist-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (name.trim() && changed) onSave({ name: name.trim(), description: description.trim(), coverSeed });
+        }}
+      >
+        <label><span>Name</span><input autoFocus maxLength={60} value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label><span>Description <em>optional</em></span><textarea maxLength={160} value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label>
+        <fieldset className="cover-picker">
+          <legend>Cover</legend>
+          <div>
+            <button type="button" className={`cover-choice cover-choice-auto ${coverSeed === null ? "selected" : ""}`} onClick={() => setCoverSeed(null)} aria-pressed={coverSeed === null}><Music2 /><span>Auto</span></button>
+            {Array.from({ length: 8 }, (_, seed) => (
+              <button type="button" className={`cover-choice cover-${seed} ${coverSeed === seed ? "selected" : ""}`} key={seed} onClick={() => setCoverSeed(seed)} aria-label={`Cover color ${seed + 1}`} aria-pressed={coverSeed === seed}>
+                {coverSeed === seed ? <Check /> : <Music2 />}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+        <button className="primary-button full-button" type="submit" disabled={!name.trim() || !changed || busy}>
+          {busy ? <LoaderCircle className="spin" /> : <Check />} Save changes
+        </button>
+      </form>
+    </Sheet>
+  );
+}
+
+function BulkPlaylistSheet({
+  tracks,
+  playlists,
+  currentPlaylist,
+  busy,
+  onClose,
+  onApply,
+  onCreate,
+}: {
+  tracks: Track[];
+  playlists: Playlist[];
+  currentPlaylist: Playlist | null;
+  busy: boolean;
+  onClose: () => void;
+  onApply: (playlistId: string, move: boolean) => void;
+  onCreate: () => void;
+}) {
+  const [targetId, setTargetId] = useState("");
+  const [move, setMove] = useState(false);
+  const targets = playlists.filter((playlist) => playlist.id !== currentPlaylist?.id);
+  return (
+    <Sheet onClose={onClose} title="Organize selected songs">
+      <div className="sheet-heading"><div><p className="eyebrow">{tracks.length} selected</p><h2>Add to playlist</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <div className="bulk-playlist-list">
+        {targets.map((playlist) => (
+          <button type="button" className={targetId === playlist.id ? "selected" : ""} key={playlist.id} onClick={() => setTargetId(playlist.id)} disabled={busy}>
+            <PlaylistCover playlist={playlist} />
+            <span><strong>{playlist.name}</strong><small>{playlist.trackCount} songs</small></span>
+            <i>{targetId === playlist.id ? <Check /> : <Plus />}</i>
+          </button>
+        ))}
+        {!targets.length ? <p className="music-picker-empty">Create another playlist to organize these songs.</p> : null}
+      </div>
+      <button className="new-playlist-inline" onClick={onCreate} disabled={busy}><Plus /> New playlist</button>
+      {currentPlaylist && targets.length ? (
+        <label className="move-toggle">
+          <input type="checkbox" checked={move} onChange={(event) => setMove(event.target.checked)} />
+          <span><strong>Move instead of add</strong><small>Remove selected songs from {currentPlaylist.name} after adding them.</small></span>
+        </label>
+      ) : null}
+      <button className="primary-button full-button" disabled={busy || !targetId} onClick={() => onApply(targetId, move)}>
+        {busy ? <LoaderCircle className="spin" /> : move ? <ArrowRight /> : <ListPlus />}
+        {move ? "Move songs" : "Add songs"}
+      </button>
+    </Sheet>
+  );
+}
+
+function DeleteTracksSheet({
+  tracks,
+  busy,
+  onClose,
+  onDelete,
+}: {
+  tracks: Track[];
+  busy: boolean;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
+  const label = tracks.length === 1 ? `“${tracks[0].title}”` : `${tracks.length} songs`;
+  return (
+    <Sheet onClose={onClose} title="Remove from My Library">
+      <div className="delete-playlist-confirmation">
+        <span><Trash2 /></span>
+        <p className="eyebrow">My Library</p>
+        <h2>Remove {label}?</h2>
+        <p>This permanently removes {tracks.length === 1 ? "the song" : "these songs"} from every playlist, Liked Songs, and listening history.</p>
+        <div>
+          <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="danger-button" onClick={onDelete} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <Trash2 />} Remove</button>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+function BugReportSheet({
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (description: string) => void;
+}) {
+  const [description, setDescription] = useState("");
+  return (
+    <Sheet onClose={onClose} title="Report a bug">
+      <div className="sheet-heading"><div><p className="eyebrow">Help improve tune</p><h2>Report a bug</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <form className="playlist-form" onSubmit={(event) => { event.preventDefault(); if (description.trim().length >= 3) onSubmit(description.trim()); }}>
+        <label><span>What happened?</span><textarea autoFocus rows={6} minLength={3} maxLength={2000} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Tell us what you expected and what happened instead…" /></label>
+        <p className="bug-context-note">Telegram version, platform, theme, and screen size are attached automatically. No messages or music files are included.</p>
+        <button className="primary-button full-button" type="submit" disabled={busy || description.trim().length < 3}>
+          {busy ? <LoaderCircle className="spin" /> : <Bug />} Send report
         </button>
       </form>
     </Sheet>
@@ -1889,6 +2502,7 @@ function TrackSheet({
   onShare,
   onAdd,
   onRemove,
+  onRemoveLibrary,
   onNewPlaylist,
 }: {
   track: Track;
@@ -1903,6 +2517,7 @@ function TrackSheet({
   onShare: () => void;
   onAdd: (playlistId: string, trackId: string) => void;
   onRemove?: () => void;
+  onRemoveLibrary: () => void;
   onNewPlaylist: () => void;
 }) {
   const standardPlaylists = playlists.filter((playlist) => playlist.kind === "standard");
@@ -1937,6 +2552,12 @@ function TrackSheet({
           );
         }) : <p className="no-playlists">No playlists yet. Create one to start collecting tracks.</p>}
       </div>
+      <div className="sheet-divider" />
+      <button className="sheet-action danger-action" onClick={onRemoveLibrary} disabled={busy}>
+        <span><Trash2 /></span>
+        <div><strong>Remove from My Library</strong><small>Deletes it from every playlist and listening history</small></div>
+        <ChevronRight />
+      </button>
     </Sheet>
   );
 }
