@@ -413,16 +413,64 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
 
 export function createPlaylist(
   user: TelegramUser,
-  input: { name: string; description?: string },
+  input: {
+    name: string;
+    description?: string;
+    trackIds?: string[];
+    moveFromPlaylistId?: string;
+  },
 ): string {
+  const db = database();
   const owner = upsertUser(user);
   const id = randomUUID();
   const timestamp = now();
-  database().prepare(`
-    INSERT INTO playlists (id, owner_id, name, description, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(id, owner.id, input.name, input.description ?? "", timestamp, timestamp);
-  return id;
+  const trackIds = [...new Set(input.trackIds ?? [])];
+  return db.transaction(() => {
+    if (trackIds.length) {
+      const placeholders = trackIds.map(() => "?").join(",");
+      const ownedTracks = db.prepare(`
+        SELECT id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+      `).all(owner.id, ...trackIds) as Array<{ id: string }>;
+      if (ownedTracks.length !== trackIds.length) throw new Error("One or more tracks were not found.");
+      if (input.moveFromPlaylistId) {
+        const source = db.prepare(`
+          SELECT 1 FROM playlists
+          WHERE id = ? AND owner_id = ? AND kind = 'standard'
+        `).get(input.moveFromPlaylistId, owner.id);
+        if (!source) throw new Error("Source playlist was not found.");
+        const sourceTracks = db.prepare(`
+          SELECT track_id FROM playlist_tracks
+          WHERE playlist_id = ? AND track_id IN (${placeholders})
+        `).all(input.moveFromPlaylistId, ...trackIds) as Array<{ track_id: string }>;
+        if (sourceTracks.length !== trackIds.length) {
+          throw new Error("One or more tracks were not found in the source playlist.");
+        }
+      }
+    }
+
+    db.prepare(`
+      INSERT INTO playlists (id, owner_id, name, description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, owner.id, input.name, input.description ?? "", timestamp, timestamp);
+
+    if (trackIds.length) {
+      const insert = db.prepare(`
+        INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+        VALUES (?, ?, ?, ?)
+      `);
+      trackIds.forEach((trackId, position) => insert.run(id, trackId, position, timestamp));
+      if (input.moveFromPlaylistId) {
+        const placeholders = trackIds.map(() => "?").join(",");
+        db.prepare(`
+          DELETE FROM playlist_tracks
+          WHERE playlist_id = ? AND track_id IN (${placeholders})
+        `).run(input.moveFromPlaylistId, ...trackIds);
+        db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?")
+          .run(timestamp, input.moveFromPlaylistId);
+      }
+    }
+    return id;
+  })();
 }
 
 export function updatePlaylistDetails(

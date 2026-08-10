@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import { POST as sendQueue } from "../src/app/api/play/route";
 import {
   addTracksToPlaylist,
   createBugReport,
@@ -162,6 +163,75 @@ test("only public playlists can be opened from a share link", () => {
 
   setPlaylistVisibility(user, playlistId, "private");
   assert.equal(getSharedPlaylistPreview(shareId), null);
+});
+
+test("a playlist can be created with selected songs and move them atomically", () => {
+  const first = saveTrack(user, {
+    fileId: "atomic-one",
+    fileUniqueId: "atomic-unique-one",
+    sourceChatId: 12345,
+    sourceMessageId: 101,
+    title: "Atomic First",
+    artist: "Tester",
+    duration: 121,
+  });
+  const second = saveTrack(user, {
+    fileId: "atomic-two",
+    fileUniqueId: "atomic-unique-two",
+    sourceChatId: 12345,
+    sourceMessageId: 102,
+    title: "Atomic Second",
+    artist: "Tester",
+    duration: 182,
+  });
+  const sourceId = createPlaylist(user, { name: "Move source" });
+  addTracksToPlaylist(user, sourceId, [first.id, second.id]);
+
+  const targetId = createPlaylist(user, {
+    name: "Created from selection",
+    trackIds: [first.id, second.id],
+    moveFromPlaylistId: sourceId,
+  });
+  const library = getLibrary(user);
+  assert.deepEqual(
+    library.playlists.find((playlist) => playlist.id === targetId)?.tracks.map((track) => track.id),
+    [first.id, second.id],
+  );
+  assert.equal(library.playlists.find((playlist) => playlist.id === sourceId)?.trackCount, 0);
+
+  assert.throws(() => createPlaylist(user, {
+    name: "Must roll back",
+    trackIds: ["missing-track"],
+  }), /not found/i);
+  assert.equal(getLibrary(user).playlists.some((playlist) => playlist.name === "Must roll back"), false);
+
+  assert.throws(() => createPlaylist(user, {
+    name: "Must not fake a move",
+    trackIds: [first.id],
+    moveFromPlaylistId: sourceId,
+  }), /source playlist/i);
+  assert.equal(getLibrary(user).playlists.some((playlist) => playlist.name === "Must not fake a move"), false);
+});
+
+test("Telegram queue API rejects empty and oversized requests", async () => {
+  process.env.DEV_TELEGRAM_ID = String(user.id);
+  try {
+    const emptyResponse = await sendQueue(new Request("http://localhost/api/play", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trackIds: [] }),
+    }));
+    assert.equal(emptyResponse.status, 400);
+
+    const oversizedResponse = await sendQueue(new Request("http://localhost/api/play", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trackIds: Array.from({ length: 31 }, (_, index) => `track-${index}`) }),
+    }));
+    assert.equal(oversizedResponse.status, 400);
+  } finally {
+    delete process.env.DEV_TELEGRAM_ID;
+  }
 });
 
 test("playlist details and generated cover can be edited", () => {

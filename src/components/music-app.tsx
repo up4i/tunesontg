@@ -79,6 +79,10 @@ function formatCollectionDuration(seconds: number): string {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} hr ${minutes % 60} min` : `${minutes} min`;
 }
 
+function formatSongCount(count: number): string {
+  return `${count} ${count === 1 ? "song" : "songs"}`;
+}
+
 function formatPlaybackTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
   const minutes = Math.floor(seconds / 60);
@@ -246,6 +250,10 @@ export function MusicApp() {
   const [muted, setMuted] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
+  const [pendingPlaylistCreate, setPendingPlaylistCreate] = useState<{
+    trackIds: string[];
+    moveFromPlaylistId?: string;
+  } | null>(null);
   const [canAddHomeScreen, setCanAddHomeScreen] = useState(false);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     if (typeof window === "undefined") return "telegram";
@@ -633,6 +641,9 @@ export function MusicApp() {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === "k") {
         event.preventDefault();
+        setSelectionMode(false);
+        setSelectedTrackIds([]);
+        setBulkPlaylistOpen(false);
         setTab("library");
         setSelectedPlaylistId(null);
         window.setTimeout(() => searchInputRef.current?.focus(), 0);
@@ -646,6 +657,7 @@ export function MusicApp() {
         || target?.isContentEditable
         || (input && input.type !== "range");
       if (typing) return;
+      if (input?.type === "range" && input.getAttribute("aria-label") === "Volume") return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
 
       if ((event.code === "Space" || event.key === " ") && currentTrack) {
@@ -813,14 +825,30 @@ export function MusicApp() {
     try {
       const result = await api<{ id: string }>("/api/playlists", {
         method: "POST",
-        body: JSON.stringify({ name, description }),
+        body: JSON.stringify({
+          name,
+          description,
+          trackIds: pendingPlaylistCreate?.trackIds,
+          moveFromPlaylistId: pendingPlaylistCreate?.moveFromPlaylistId,
+        }),
       });
       await loadLibrary();
       setCreateOpen(false);
+      const organizedCount = pendingPlaylistCreate?.trackIds.length ?? 0;
+      const moved = Boolean(pendingPlaylistCreate?.moveFromPlaylistId);
+      setPendingPlaylistCreate(null);
+      if (organizedCount) clearSelection();
       setSelectedPlaylistId(result.id);
       setTab("playlists");
       haptic("success");
-      setToast({ kind: "success", message: "Playlist created" });
+      setToast({
+        kind: "success",
+        message: organizedCount
+          ? moved
+            ? `Playlist created and ${organizedCount} ${organizedCount === 1 ? "song" : "songs"} moved`
+            : `Playlist created with ${organizedCount} ${organizedCount === 1 ? "song" : "songs"}`
+          : "Playlist created",
+      });
     } catch (mutationError) {
       setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not create playlist." });
     } finally {
@@ -1174,7 +1202,7 @@ export function MusicApp() {
   }
 
   return (
-    <div className={`app-frame ${currentTrack ? "has-player" : ""}`}>
+    <div className={`app-frame ${currentTrack ? "has-player" : ""} ${selectionMode ? "selection-active" : ""}`}>
       <audio
         ref={audioRef}
         preload="metadata"
@@ -1263,7 +1291,7 @@ export function MusicApp() {
             <PlaylistsScreen
               playlists={library.playlists}
               onOpen={setSelectedPlaylistId}
-              onCreate={() => setCreateOpen(true)}
+              onCreate={() => { setPendingPlaylistCreate(null); setCreateOpen(true); }}
             />
           ) : null}
           {tab === "playlists" && selectedPlaylist ? (
@@ -1322,7 +1350,7 @@ export function MusicApp() {
       {createOpen ? (
         <CreatePlaylistSheet
           busy={mutating}
-          onClose={() => setCreateOpen(false)}
+          onClose={() => { setCreateOpen(false); setPendingPlaylistCreate(null); }}
           onCreate={(name, description) => void createPlaylist(name, description)}
         />
       ) : null}
@@ -1359,7 +1387,16 @@ export function MusicApp() {
           busy={mutating}
           onClose={() => setBulkPlaylistOpen(false)}
           onApply={(playlistId, move) => void organizeSelectedTracks(playlistId, move)}
-          onCreate={() => { setBulkPlaylistOpen(false); setCreateOpen(true); }}
+          onCreate={(move) => {
+            setPendingPlaylistCreate({
+              trackIds: [...selectedTrackIds],
+              moveFromPlaylistId: move && selectedPlaylist?.kind === "standard"
+                ? selectedPlaylist.id
+                : undefined,
+            });
+            setBulkPlaylistOpen(false);
+            setCreateOpen(true);
+          }}
         />
       ) : null}
       {deleteTrackTargets.length ? (
@@ -1437,7 +1474,7 @@ export function MusicApp() {
             ? () => void removeFromPlaylist(selectedPlaylist.id, trackMenu.id)
             : undefined}
           onRemoveLibrary={() => { setTrackMenu(null); setDeleteTrackTargets([trackMenu]); }}
-          onNewPlaylist={() => { setTrackMenu(null); setCreateOpen(true); }}
+          onNewPlaylist={() => { setTrackMenu(null); setPendingPlaylistCreate(null); setCreateOpen(true); }}
         />
       ) : null}
       {currentTrack ? (
@@ -1595,7 +1632,7 @@ function HomeScreen({
           <div className="featured-label"><Sparkles /> For tonight</div>
           <div className="featured-copy">
             <h2>{featured.name}</h2>
-            <p>{featured.description || `${featured.trackCount} songs from your library`}</p>
+            <p>{featured.description || `${formatSongCount(featured.trackCount)} from your library`}</p>
           </div>
           <div className="featured-art"><PlaylistCover playlist={featured} large /></div>
           <span className="round-play"><Play fill="currentColor" /></span>
@@ -1694,7 +1731,7 @@ function LibraryScreen({
         />
         {search ? <button onClick={() => setSearch("")} aria-label="Clear search"><X /></button> : null}
       </label>
-      <div className="list-meta"><span>{search ? `${tracks.length} found` : `${total} songs`}</span><span>Recently added</span></div>
+      <div className="list-meta"><span>{search ? `${tracks.length} found` : formatSongCount(total)}</span><span>Recently added</span></div>
       <div className="track-list">
         {tracks.length ? tracks.map((track) => (
           <TrackRow
@@ -1727,7 +1764,7 @@ function PlaylistsScreen({ playlists, onOpen, onCreate }: { playlists: Playlist[
             <button className="playlist-card" key={playlist.id} onClick={() => onOpen(playlist.id)}>
               <PlaylistCover playlist={playlist} />
               <span className="playlist-card-title">{playlist.name}</span>
-              <span className="playlist-card-meta">{playlist.trackCount} songs · {formatCollectionDuration(playlist.duration)}</span>
+              <span className="playlist-card-meta">{formatSongCount(playlist.trackCount)} · {formatCollectionDuration(playlist.duration)}</span>
             </button>
           ))}
           <button className="new-playlist-card" onClick={onCreate}>
@@ -1790,23 +1827,23 @@ function PlaylistDetail({
         <p className="eyebrow">Playlist</p>
         <h1>{playlist.name}</h1>
         {playlist.description ? <p className="playlist-description">{playlist.description}</p> : null}
-        <p className="playlist-stats">{playlist.trackCount} songs · {formatCollectionDuration(playlist.duration)}</p>
+        <p className="playlist-stats">{formatSongCount(playlist.trackCount)} · {formatCollectionDuration(playlist.duration)}</p>
         <div className="playlist-actions">
           {playlist.kind === "standard" ? <button className="secondary-button playlist-add-music" onClick={onAddMusic} disabled={busy || selecting}><ListPlus /> Add music</button> : null}
           <button className="secondary-button" onClick={onShuffle} disabled={busy || selecting || !playlist.trackCount}><Shuffle /> Shuffle</button>
           <button className="play-button" onClick={onPlay} disabled={busy || selecting || !playlist.trackCount}><Play fill="currentColor" /></button>
           {playlist.kind === "standard" ? (
-            <button className="playlist-delete" onClick={onDelete} disabled={busy} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
+            <button className="playlist-delete" onClick={onDelete} disabled={busy || selecting} aria-label={`Delete ${playlist.name}`} title="Delete playlist"><Trash2 /></button>
           ) : null}
         </div>
         {playlist.kind === "standard" ? (
           <div className="playlist-sharing-actions">
-            <button onClick={onEdit} disabled={busy}><Pencil /> Edit</button>
-            <button onClick={onVisibility} disabled={busy}>
+            <button onClick={onEdit} disabled={busy || selecting}><Pencil /> Edit</button>
+            <button onClick={onVisibility} disabled={busy || selecting}>
               {playlist.visibility === "public" ? <Globe2 /> : <Lock />}
               {playlist.visibility === "public" ? "Public" : "Private"}
             </button>
-            <button onClick={onShare} disabled={busy || playlist.visibility !== "public"} title={playlist.visibility === "private" ? "Make this playlist public to share it" : "Share playlist"}>
+            <button onClick={onShare} disabled={busy || selecting || playlist.visibility !== "public"} title={playlist.visibility === "private" ? "Make this playlist public to share it" : "Share playlist"}>
               <Share2 /> Share
             </button>
           </div>
@@ -2068,6 +2105,24 @@ function SelectionToolbar({
 }
 
 function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCloseRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
   return (
     <div className="sheet-layer" role="dialog" aria-modal="true" aria-label={title}>
       <button className="sheet-backdrop" onClick={onClose} aria-label="Close" />
@@ -2159,7 +2214,7 @@ function BulkPlaylistSheet({
   busy: boolean;
   onClose: () => void;
   onApply: (playlistId: string, move: boolean) => void;
-  onCreate: () => void;
+  onCreate: (move: boolean) => void;
 }) {
   const [targetId, setTargetId] = useState("");
   const [move, setMove] = useState(false);
@@ -2171,19 +2226,19 @@ function BulkPlaylistSheet({
         {targets.map((playlist) => (
           <button type="button" className={targetId === playlist.id ? "selected" : ""} key={playlist.id} onClick={() => setTargetId(playlist.id)} disabled={busy}>
             <PlaylistCover playlist={playlist} />
-            <span><strong>{playlist.name}</strong><small>{playlist.trackCount} songs</small></span>
+            <span><strong>{playlist.name}</strong><small>{formatSongCount(playlist.trackCount)}</small></span>
             <i>{targetId === playlist.id ? <Check /> : <Plus />}</i>
           </button>
         ))}
         {!targets.length ? <p className="music-picker-empty">Create another playlist to organize these songs.</p> : null}
       </div>
-      <button className="new-playlist-inline" onClick={onCreate} disabled={busy}><Plus /> New playlist</button>
-      {currentPlaylist && targets.length ? (
+      {currentPlaylist ? (
         <label className="move-toggle">
           <input type="checkbox" checked={move} onChange={(event) => setMove(event.target.checked)} />
           <span><strong>Move instead of add</strong><small>Remove selected songs from {currentPlaylist.name} after adding them.</small></span>
         </label>
       ) : null}
+      <button className="new-playlist-inline" onClick={() => onCreate(move)} disabled={busy}><Plus /> New playlist</button>
       <button className="primary-button full-button" disabled={busy || !targetId} onClick={() => onApply(targetId, move)}>
         {busy ? <LoaderCircle className="spin" /> : move ? <ArrowRight /> : <ListPlus />}
         {move ? "Move songs" : "Add songs"}
@@ -2475,7 +2530,7 @@ function SharedItemSheet({
         <button className="icon-button" onClick={onClose} aria-label="Close shared playlist"><X /></button>
       </div>
       {preview.description ? <p className="shared-playlist-description">{preview.description}</p> : null}
-      <p className="shared-playlist-stats">{preview.trackCount} songs · {formatCollectionDuration(preview.duration)}</p>
+      <p className="shared-playlist-stats">{formatSongCount(preview.trackCount)} · {formatCollectionDuration(preview.duration)}</p>
       <div className="shared-playlist-tracks">
         {preview.tracks.map((track, index) => (
           <div key={`${track.title}-${track.artist}-${index}`}>
@@ -2546,7 +2601,7 @@ function TrackSheet({
           return (
             <button key={playlist.id} disabled={busy || alreadyAdded} onClick={() => onAdd(playlist.id, track.id)}>
               <PlaylistCover playlist={playlist} />
-              <span><strong>{playlist.name}</strong><small>{playlist.trackCount} songs</small></span>
+              <span><strong>{playlist.name}</strong><small>{formatSongCount(playlist.trackCount)}</small></span>
               {alreadyAdded ? <Check className="added-check" /> : <ListPlus />}
             </button>
           );
