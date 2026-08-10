@@ -4,6 +4,46 @@ Source: testing by [@gagster](https://t.me/gagster) on a Windows PC.
 
 This entry preserves all 37 points from the test report, turns them into trackable work, and records what is already present in the repository. Priorities are an initial product recommendation, not a delivery commitment.
 
+## Executive summary
+
+Validated against `main` on 2026-08-10:
+
+- **19 implemented or shipped:** TGFB-001 through TGFB-005, TGFB-007, TGFB-009 through TGFB-012, TGFB-014 through TGFB-016, TGFB-020, TGFB-023 through TGFB-025, TGFB-028, and TGFB-031.
+- **6 partially implemented:** TGFB-006, TGFB-008, TGFB-017, TGFB-021, TGFB-027, and TGFB-030.
+- **10 not implemented:** TGFB-013, TGFB-018, TGFB-019, TGFB-022, TGFB-026, TGFB-029, and TGFB-032 through TGFB-035.
+- **2 research/defer items:** TGFB-036 and TGFB-037.
+
+`Implemented / verify` means the behavior exists in the repository but still needs a matching Telegram-client test on a deployment containing the current commit. It should not be treated as confirmation that the tester saw the latest build.
+
+## Recommended next implementation
+
+### 1. Verify the shipped baseline
+
+Before expanding the product, repeat the Windows Telegram Desktop pass against a deployment built from the reviewed commit. Prioritize the Now Playing viewport and animation (TGFB-001/TGFB-002), queue behavior (TGFB-004), keyboard shortcuts (TGFB-007), theme synchronization (TGFB-023/TGFB-024), deep links (TGFB-028), and public/private sharing (TGFB-031). Record the Telegram client version, viewport, deployment URL, and commit SHA.
+
+### 2. Ship the next core collection batch
+
+- **Editable playlist metadata and covers (TGFB-013/TGFB-021):** add a playlist edit flow for name, description, and cover, including a generated-cover fallback and upload validation.
+- **Library multi-select and bulk actions (TGFB-018):** build one selection model for add, remove, like, share, and move actions. Label removal explicitly as either removal from the current playlist or deletion from the library.
+- **Broader duplicate detection (TGFB-017):** keep exact `file_unique_id` protection and add a conservative metadata/fingerprint policy with an explicit user override for uncertain matches.
+
+These improve the existing library and playlist workflows without first requiring a social graph, multi-user permissions, or new media infrastructure.
+
+### 3. Add focused Telegram and support polish
+
+- Add the capability-checked home-screen action (TGFB-026), a visible bug-report flow with non-sensitive diagnostics (TGFB-029), and branded loading/error states (TGFB-030).
+- Finish import-completion haptics in an in-app import flow (TGFB-027).
+- Treat swipe gestures (TGFB-006) as optional enhancement work after the visible queue and like actions pass mobile testing.
+
+Telegram officially documents `addToHomeScreen`, theme events, and haptic feedback in the [Mini Apps WebApp API](https://core.telegram.org/bots/webapps), so these integrations should be feature-detected and tested per client.
+
+### 4. Defer platform-risk and multi-user expansions
+
+- **Native Telegram playback control (TGFB-008):** retain browser Media Session controls and the existing `sendAudio`/`sendMediaGroup` handoff. The official Mini Apps WebApp API does not currently document control of Telegram's native audio player, so do not promise native-player control without a supported Telegram API.
+- **Social and collaboration (TGFB-022/TGFB-032 through TGFB-035):** design roles, blocks, privacy defaults, moderation, notification consent, rate limits, and abuse controls before implementation. Plan a Postgres migration before collaborative writes or horizontal scaling.
+- **YouTube conversion (TGFB-036):** do not implement the proposed converter without platform approval and a rights/compliance design. YouTube's [API Services Developer Policies](https://developers.google.com/youtube/terms/developer-policies) prohibit downloading/importing audiovisual content and separating audio without prior written approval; a 10-minute cap limits cost but does not resolve the policy issue.
+- **Podcasts (TGFB-037):** revisit after defining feed ingestion, episode identity, long-form resume position, queue semantics, and bandwidth/storage policy.
+
 ## Status and priority
 
 - **Backlog**: no complete implementation was found.
@@ -75,13 +115,13 @@ This entry preserves all 37 points from the test report, turns them into trackab
 
 | ID | Priority | Status | Feedback and acceptance note |
 | --- | --- | --- | --- |
-| TGFB-036 | P3 | Research | Investigate a YouTube import/conversion flow with a maximum source length around 10 minutes. Before building, confirm platform terms, copyright policy, supported inputs, quotas, failure handling, and infrastructure cost. If approved, reject over-limit sources before expensive conversion work. |
+| TGFB-036 | P3 | Research | Do not implement a YouTube converter without prior platform approval and a rights/compliance design. YouTube's API policies prohibit downloading/importing audiovisual content and separating audio without prior written approval. A maximum source length around 10 minutes would limit cost only after the feature is approved; it does not resolve the policy issue. |
 | TGFB-037 | P3 | Research | Explore podcasts as a separate content type. Discovery should cover feeds/import, episode metadata, long-form playback position, downloads/streaming, queue behavior, and storage/bandwidth implications. |
 
 ## Recommended delivery order
 
 1. **Implemented; matching-client verification pending:** TGFB-001 through TGFB-005, TGFB-007, TGFB-009 through TGFB-012, TGFB-014 through TGFB-016, TGFB-023 through TGFB-025, TGFB-028, and TGFB-031.
-2. **Next core collection workflows:** broader duplicate handling in TGFB-017, bulk actions in TGFB-018, and editable playlist metadata in TGFB-013/TGFB-021.
+2. **Next core collection workflows:** editable playlist metadata in TGFB-013/TGFB-021, bulk actions in TGFB-018, and broader duplicate handling in TGFB-017.
 3. **Remaining queue gesture:** TGFB-006 after verifying the visible queue actions in TGFB-004.
 4. **Remaining Telegram-native details:** TGFB-026 through TGFB-030 after verifying TGFB-023 through TGFB-025.
 5. **Sharing foundation implemented:** verify TGFB-028, TGFB-031, TGFB-012, TGFB-014, and TGFB-015 before building friends or collaboration.
