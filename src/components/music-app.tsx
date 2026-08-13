@@ -48,8 +48,9 @@ import type { LibraryPayload, Playlist, SharedPreview, Track } from "@/lib/types
 type Tab = "home" | "library" | "playlists" | "profile";
 type ThemeMode = "telegram" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
+type RepeatMode = "off" | "all" | "one";
 type Toast = { kind: "success" | "error"; message: string } | null;
-const primedStreamUrls = new Set<string>();
+const primedStreamRequests = new Map<string, Promise<void>>();
 
 function haptic(kind: "selection" | "success" | "error" = "selection") {
   const webApp = window.Telegram?.WebApp;
@@ -59,15 +60,27 @@ function haptic(kind: "selection" | "success" | "error" = "selection") {
   else feedback?.notificationOccurred(kind);
 }
 
-function primeTrackStream(track: Track) {
-  if (!track.playable || !track.streamUrl || primedStreamUrls.has(track.streamUrl)) return;
-  primedStreamUrls.add(track.streamUrl);
-  void fetch(track.streamUrl, {
-    headers: { range: "bytes=0-0", "x-telegram-init-data": initData() },
-  }).then((response) => {
-    if (!response.ok) primedStreamUrls.delete(track.streamUrl!);
-    return response.body?.cancel();
-  }).catch(() => primedStreamUrls.delete(track.streamUrl!));
+function primeTrackStream(track: Track): Promise<void> {
+  if (!track.playable || !track.streamUrl) return Promise.resolve();
+  const existing = primedStreamRequests.get(track.streamUrl);
+  if (existing) return existing;
+
+  const streamUrl = track.streamUrl;
+  const request = fetch(streamUrl, {
+    cache: "force-cache",
+    headers: { range: "bytes=0-262143", "x-telegram-init-data": initData() },
+  }).then(async (response) => {
+    if (!response.ok) throw new Error("Could not prepare audio.");
+    await response.arrayBuffer();
+  }).catch(() => {
+    primedStreamRequests.delete(streamUrl);
+  });
+  if (primedStreamRequests.size >= 64) {
+    const oldestUrl = primedStreamRequests.keys().next().value;
+    if (oldestUrl) primedStreamRequests.delete(oldestUrl);
+  }
+  primedStreamRequests.set(streamUrl, request);
+  return request;
 }
 
 function initData(): string {
@@ -182,6 +195,16 @@ function Cover({
         <><div className="cover-orbit" /><Music2 aria-hidden="true" /></>
       )}
     </div>
+  );
+}
+
+function UserAvatar({ name, photoUrl }: { name: string; photoUrl: string | null }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  if (!photoUrl || failedUrl === photoUrl) return <span className="user-avatar-fallback">{name.charAt(0).toUpperCase()}</span>;
+  return (
+    // Telegram supplies this URL, so a native image is the correct fit here.
+    // eslint-disable-next-line @next/next/no-img-element
+    <img src={photoUrl} alt="" referrerPolicy="no-referrer" onError={() => setFailedUrl(photoUrl)} />
   );
 }
 
@@ -389,7 +412,7 @@ export function MusicApp() {
   const [sharedPreview, setSharedPreview] = useState<SharedPreview | null>(null);
   const [sharedLoading, setSharedLoading] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
-  const [repeatOne, setRepeatOne] = useState(false);
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>("off");
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -588,8 +611,18 @@ export function MusicApp() {
   }, []);
 
   useEffect(() => {
-    library?.tracks.slice(0, 4).forEach(primeTrackStream);
+    library?.tracks.slice(0, 4).forEach((track) => void primeTrackStream(track));
   }, [library]);
+
+  useEffect(() => {
+    const candidates = [
+      queue[queueIndex + 1],
+      queue[queueIndex + 2],
+      playbackStack.at(-1),
+      repeatMode === "all" && queue.length === 1 ? playbackStack[0] : null,
+    ];
+    candidates.forEach((track) => { if (track) void primeTrackStream(track); });
+  }, [playbackStack, queue, queueIndex, repeatMode]);
 
   useEffect(() => {
     const refreshWhenVisible = () => {
@@ -611,6 +644,7 @@ export function MusicApp() {
     if (audio.getAttribute("src") !== track.streamUrl) {
       audio.src = track.streamUrl;
     }
+    audio.currentTime = 0;
     setCurrentTime(0);
     setMediaDuration(track.duration);
     historyRecordedTrackRef.current = null;
@@ -671,6 +705,15 @@ export function MusicApp() {
     if (!queue.length) return;
     if (direction === 1) {
       if (queue.length === 1) {
+        if (repeatMode === "all") {
+          const cycle = playbackStack.length ? [...playbackStack, queue[queueIndex]] : [queue[queueIndex]];
+          setQueue(cycle);
+          setQueueIndex(0);
+          setPlaybackStack([]);
+          activateTrack(cycle[0]);
+          haptic();
+          return;
+        }
         audioRef.current?.pause();
         setIsPlaying(false);
         return;
@@ -691,7 +734,7 @@ export function MusicApp() {
     setQueueIndex(nextIndex);
     activateTrack(queue[nextIndex]);
     haptic();
-  }, [activateTrack, queue, queueIndex]);
+  }, [activateTrack, playbackStack, queue, queueIndex, repeatMode]);
 
   const previousTrack = useCallback(() => {
     const audio = audioRef.current;
@@ -792,6 +835,16 @@ export function MusicApp() {
     }
     haptic();
   }, [currentTrack, queue, shuffleEnabled]);
+
+  const cycleRepeatMode = useCallback(() => {
+    const nextMode: RepeatMode = repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off";
+    setRepeatMode(nextMode);
+    haptic();
+    setToast({
+      kind: "success",
+      message: nextMode === "off" ? "Repeat off" : nextMode === "all" ? "Repeat all" : "Repeat song",
+    });
+  }, [repeatMode]);
 
   function playTrackNext(track: Track) {
     if (!track.playable || !track.streamUrl) {
@@ -1216,14 +1269,31 @@ export function MusicApp() {
   ) {
     setMutating(true);
     try {
-      await api(`/api/playlists/${playlist.id}`, {
+      const updated = await api<{
+        name: string;
+        description: string;
+        coverSeed: number | null;
+        coverImage: string | null;
+      }>(`/api/playlists/${playlist.id}`, {
         method: "PATCH",
         body: JSON.stringify(details),
       });
-      await loadLibrary();
+      setLibrary((current) => current ? {
+        ...current,
+        playlists: current.playlists.map((item) => item.id === playlist.id
+          ? {
+            ...item,
+            name: updated.name,
+            description: updated.description,
+            coverSeed: updated.coverSeed,
+            coverImage: updated.coverImage,
+          }
+          : item),
+      } : current);
       setEditPlaylistTarget(null);
       haptic("success");
       setToast({ kind: "success", message: "Playlist updated" });
+      void refreshLibraryInBackground();
     } catch (mutationError) {
       haptic("error");
       setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update playlist." });
@@ -1465,7 +1535,7 @@ export function MusicApp() {
           }
         }}
         onEnded={() => {
-          if (repeatOne && audioRef.current) {
+          if (repeatMode === "one" && audioRef.current) {
             audioRef.current.currentTime = 0;
             void audioRef.current.play();
           } else {
@@ -1732,7 +1802,7 @@ export function MusicApp() {
           duration={mediaDuration || currentTrack.duration}
           isPlaying={isPlaying}
           shuffleEnabled={shuffleEnabled}
-          repeatOne={repeatOne}
+          repeatMode={repeatMode}
           volume={volume}
           muted={muted}
           onClose={() => setPlayerOpen(false)}
@@ -1741,7 +1811,7 @@ export function MusicApp() {
           onNext={() => advanceTrack(1)}
           onSeek={seekTo}
           onShuffle={toggleShuffle}
-          onRepeat={() => { setRepeatOne((value) => !value); haptic(); }}
+          onRepeat={cycleRepeatMode}
           onVolumeChange={changeVolume}
           onMuteToggle={toggleMute}
           onMore={() => setTrackMenu(currentTrack)}
@@ -1810,7 +1880,7 @@ function Header({
           <ThemeIcon />
         </button>
         <button className="avatar" onClick={onProfile} aria-label={`Open ${name}'s profile`}>
-          {photoUrl ? <span className="avatar-image" style={{ backgroundImage: `url(${photoUrl})` }} /> : name.charAt(0).toUpperCase()}
+          <UserAvatar name={name} photoUrl={photoUrl} />
         </button>
       </div>
     </header>
@@ -2051,9 +2121,7 @@ function ProfileScreen({ library }: { library: LibraryPayload }) {
       </div>
       <section className="profile-card">
         <div className="profile-avatar" aria-label={`${displayName}'s profile picture`}>
-          {library.user.photoUrl
-            ? <span style={{ backgroundImage: `url(${library.user.photoUrl})` }} />
-            : displayName.charAt(0).toUpperCase()}
+          <UserAvatar name={displayName} photoUrl={library.user.photoUrl} />
         </div>
         <h2>{displayName}</h2>
         <p>{library.user.username ? `@${library.user.username}` : "Telegram listener"}</p>
@@ -2200,7 +2268,7 @@ function NowPlaying({
   duration,
   isPlaying,
   shuffleEnabled,
-  repeatOne,
+  repeatMode,
   volume,
   muted,
   onClose,
@@ -2223,7 +2291,7 @@ function NowPlaying({
   duration: number;
   isPlaying: boolean;
   shuffleEnabled: boolean;
-  repeatOne: boolean;
+  repeatMode: RepeatMode;
   volume: number;
   muted: boolean;
   onClose: () => void;
@@ -2238,14 +2306,94 @@ function NowPlaying({
   onMore: () => void;
   onQueue: () => void;
 }) {
-  const [volumeOpen, setVolumeOpen] = useState(false);
-  const playerDragRef = useRef<{ pointerId: number; startY: number; startTime: number } | null>(null);
+  const playerRef = useRef<HTMLElement>(null);
+  const playerOnCloseRef = useRef(onClose);
+  const playerDragRef = useRef<{ startY: number; lastY: number; startTime: number } | null>(null);
+  const playerTouchRef = useRef<{ startY: number; lastY: number; startTime: number } | null>(null);
   const [playerDragY, setPlayerDragY] = useState(0);
   const safeDuration = Math.max(duration || 0, 0);
   const displayedVolume = muted ? 0 : volume;
   const VolumeIcon = muted || volume === 0 ? VolumeX : Volume2;
+  const repeatLabel = repeatMode === "off"
+    ? "Repeat is off. Turn on repeat all"
+    : repeatMode === "all"
+      ? "Repeat all is on. Turn on repeat song"
+      : "Repeat song is on. Turn repeat off";
+
+  useEffect(() => {
+    playerOnCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !open) return;
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("button, a, input, textarea, select, [role='button']")) return;
+      const startY = event.touches[0].clientY;
+      playerTouchRef.current = { startY, lastY: startY, startTime: performance.now() };
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const drag = playerTouchRef.current;
+      if (!drag || event.touches.length !== 1) return;
+      drag.lastY = event.touches[0].clientY;
+      const distance = drag.lastY - drag.startY;
+      if (distance <= 0) return;
+      event.preventDefault();
+      setPlayerDragY(distance);
+    };
+    const finishTouch = () => {
+      const drag = playerTouchRef.current;
+      if (!drag) return;
+      playerTouchRef.current = null;
+      const distance = Math.max(0, drag.lastY - drag.startY);
+      const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+      if (distance >= 72 || (distance >= 28 && velocity > 0.55)) playerOnCloseRef.current();
+      setPlayerDragY(0);
+    };
+    const header = player.querySelector<HTMLElement>(".player-header");
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button !== 0 || (event.target instanceof Element && event.target.closest("button"))) return;
+      event.preventDefault();
+      playerDragRef.current = { startY: event.clientY, lastY: event.clientY, startTime: performance.now() };
+    };
+    const onMouseMove = (event: MouseEvent) => {
+      const drag = playerDragRef.current;
+      if (!drag) return;
+      drag.lastY = event.clientY;
+      setPlayerDragY(Math.max(0, drag.lastY - drag.startY));
+    };
+    const onMouseUp = () => {
+      const drag = playerDragRef.current;
+      if (!drag) return;
+      playerDragRef.current = null;
+      const distance = Math.max(0, drag.lastY - drag.startY);
+      const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+      if (distance >= 72 || (distance >= 28 && velocity > 0.55)) playerOnCloseRef.current();
+      setPlayerDragY(0);
+    };
+    player.addEventListener("touchstart", onTouchStart, { passive: true });
+    player.addEventListener("touchmove", onTouchMove, { passive: false });
+    player.addEventListener("touchend", finishTouch, { passive: true });
+    player.addEventListener("touchcancel", finishTouch, { passive: true });
+    header?.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      player.removeEventListener("touchstart", onTouchStart);
+      player.removeEventListener("touchmove", onTouchMove);
+      player.removeEventListener("touchend", finishTouch);
+      player.removeEventListener("touchcancel", finishTouch);
+      header?.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [open]);
+
   return (
     <section
+      ref={playerRef}
       className={`now-playing cover-${track.artworkSeed % 8} ${open ? "now-playing-open" : ""}`}
       role="dialog"
       aria-modal={open ? "true" : undefined}
@@ -2254,29 +2402,7 @@ function NowPlaying({
       style={{ "--player-drag": `${playerDragY}px` } as React.CSSProperties}
     >
       <div className="now-playing-wash" />
-      <header
-        className="player-header"
-        onPointerDown={(event) => {
-          if (event.target instanceof Element && event.target.closest("button")) return;
-          playerDragRef.current = { pointerId: event.pointerId, startY: event.clientY, startTime: performance.now() };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          const drag = playerDragRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          setPlayerDragY(Math.max(0, event.clientY - drag.startY));
-        }}
-        onPointerUp={(event) => {
-          const drag = playerDragRef.current;
-          if (!drag || drag.pointerId !== event.pointerId) return;
-          const distance = Math.max(0, event.clientY - drag.startY);
-          const velocity = distance / Math.max(1, performance.now() - drag.startTime);
-          playerDragRef.current = null;
-          if (distance >= 72 || (distance >= 28 && velocity > 0.55)) onClose();
-          setPlayerDragY(0);
-        }}
-        onPointerCancel={() => { playerDragRef.current = null; setPlayerDragY(0); }}
-      >
+      <header className="player-header">
         <button onClick={onClose} aria-label="Minimize player"><ChevronDown /></button>
         <div><span>Now playing</span><strong>From your Telegram library · {queuePosition}/{queueLength}</strong></div>
         <button onClick={onMore} aria-label={`More options for ${track.title}`}><MoreHorizontal /></button>
@@ -2311,9 +2437,9 @@ function NowPlaying({
             {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
           </button>
           <button onClick={onNext} aria-label="Next track"><SkipForward fill="currentColor" /></button>
-          <button className={`repeat-control ${repeatOne ? "active" : ""}`} onClick={onRepeat} aria-label={repeatOne ? "Loop this song is on" : "Loop this song is off"} aria-pressed={repeatOne}>
+          <button className={`repeat-control ${repeatMode !== "off" ? "active" : ""}`} onClick={onRepeat} aria-label={repeatLabel}>
             <Repeat2 />
-            {repeatOne ? <span aria-hidden="true">1</span> : null}
+            {repeatMode === "one" ? <span aria-hidden="true">1</span> : null}
           </button>
         </div>
         <button className="queue-open-button" onClick={onQueue}>
@@ -2322,39 +2448,25 @@ function NowPlaying({
           <strong>{queuePosition} of {queueLength}</strong>
           <ChevronRight />
         </button>
-        <div className={`player-utility-row ${volumeOpen ? "volume-control-open" : ""}`}>
-          <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
+        <div className="player-volume-bar">
           <button
-            className="volume-disclosure"
-            onClick={() => setVolumeOpen((value) => !value)}
-            aria-expanded={volumeOpen}
-            aria-controls="player-volume-panel"
-            aria-label="Volume controls"
+            onClick={onMuteToggle}
+            aria-label={muted ? "Unmute" : "Mute"}
+            title={muted ? "Unmute" : "Mute"}
           >
             <VolumeIcon />
           </button>
-          <div className="volume-panel" id="player-volume-panel" aria-hidden={!volumeOpen}>
-            <button
-              onClick={onMuteToggle}
-              disabled={!volumeOpen}
-              aria-label={muted ? "Unmute" : "Mute"}
-              title={muted ? "Unmute" : "Mute"}
-            >
-              <VolumeIcon />
-            </button>
-            <input
-              aria-label="Volume"
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={displayedVolume}
-              disabled={!volumeOpen}
-              onChange={(event) => onVolumeChange(Number(event.target.value))}
-              style={{ "--volume": `${displayedVolume * 100}%` } as React.CSSProperties}
-            />
-            <output>{Math.round(displayedVolume * 100)}%</output>
-          </div>
+          <input
+            aria-label="Volume"
+            type="range"
+            min="0"
+            max="1"
+            step="0.01"
+            value={displayedVolume}
+            onChange={(event) => onVolumeChange(Number(event.target.value))}
+            style={{ "--volume": `${displayedVolume * 100}%` } as React.CSSProperties}
+          />
+          <output>{muted ? "Muted" : `${Math.round(displayedVolume * 100)}%`}</output>
         </div>
       </div>
     </section>
@@ -2424,10 +2536,12 @@ function SelectionToolbar({
 }
 
 function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
+  const sheetRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const closeTimerRef = useRef(0);
   const closingRef = useRef(false);
-  const dragRef = useRef<{ pointerId: number; startY: number; startTime: number } | null>(null);
+  const dragRef = useRef<{ startY: number; lastY: number; startTime: number } | null>(null);
+  const touchDragRef = useRef<{ startY: number; lastY: number; startTime: number } | null>(null);
   const [closing, setClosing] = useState(false);
   const [dragY, setDragY] = useState(0);
   useEffect(() => {
@@ -2437,7 +2551,6 @@ function Sheet({ children, onClose, title }: { children: React.ReactNode; onClos
     if (closingRef.current) return;
     closingRef.current = true;
     setClosing(true);
-    setDragY(0);
     closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 220);
   }, []);
   useEffect(() => {
@@ -2455,10 +2568,77 @@ function Sheet({ children, onClose, title }: { children: React.ReactNode; onClos
       window.clearTimeout(closeTimerRef.current);
     };
   }, [requestClose]);
+  useEffect(() => {
+    const sheet = sheetRef.current;
+    if (!sheet) return;
+    const onTouchStart = (event: TouchEvent) => {
+      if (closingRef.current || event.touches.length !== 1 || sheet.scrollTop > 1) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest("button, a, input, textarea, select, [role='button'], [data-no-swipe-dismiss]")) return;
+      const startY = event.touches[0].clientY;
+      touchDragRef.current = { startY, lastY: startY, startTime: performance.now() };
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const drag = touchDragRef.current;
+      if (!drag || event.touches.length !== 1) return;
+      drag.lastY = event.touches[0].clientY;
+      const distance = drag.lastY - drag.startY;
+      if (distance <= 0 || sheet.scrollTop > 1) return;
+      event.preventDefault();
+      setDragY(distance);
+    };
+    const finishTouch = () => {
+      const drag = touchDragRef.current;
+      if (!drag) return;
+      touchDragRef.current = null;
+      const distance = Math.max(0, drag.lastY - drag.startY);
+      const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+      if (distance >= 72 || (distance >= 28 && velocity > 0.55)) requestClose();
+      else setDragY(0);
+    };
+    const handle = sheet.querySelector<HTMLElement>(".sheet-handle");
+    const onMouseDown = (event: MouseEvent) => {
+      if (closingRef.current || event.button !== 0) return;
+      event.preventDefault();
+      dragRef.current = { startY: event.clientY, lastY: event.clientY, startTime: performance.now() };
+    };
+    const onMouseMove = (event: MouseEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      drag.lastY = event.clientY;
+      setDragY(Math.max(0, drag.lastY - drag.startY));
+    };
+    const onMouseUp = () => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      dragRef.current = null;
+      const distance = Math.max(0, drag.lastY - drag.startY);
+      const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+      if (distance >= 72 || (distance >= 28 && velocity > 0.55)) requestClose();
+      else setDragY(0);
+    };
+    sheet.addEventListener("touchstart", onTouchStart, { passive: true });
+    sheet.addEventListener("touchmove", onTouchMove, { passive: false });
+    sheet.addEventListener("touchend", finishTouch, { passive: true });
+    sheet.addEventListener("touchcancel", finishTouch, { passive: true });
+    handle?.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      sheet.removeEventListener("touchstart", onTouchStart);
+      sheet.removeEventListener("touchmove", onTouchMove);
+      sheet.removeEventListener("touchend", finishTouch);
+      sheet.removeEventListener("touchcancel", finishTouch);
+      handle?.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [requestClose]);
   return (
     <div className={`sheet-layer ${closing ? "sheet-layer-closing" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
       <button className="sheet-backdrop" onClick={requestClose} aria-label="Close" />
       <div
+        ref={sheetRef}
         className={`sheet ${dragY ? "sheet-dragging" : ""}`}
         style={{ "--sheet-drag": `${dragY}px` } as React.CSSProperties}
         onClickCapture={(event) => {
@@ -2469,30 +2649,7 @@ function Sheet({ children, onClose, title }: { children: React.ReactNode; onClos
           requestClose();
         }}
       >
-        <div
-          className="sheet-handle"
-          aria-label="Swipe down to close"
-          onPointerDown={(event) => {
-            if (closing) return;
-            dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startTime: performance.now() };
-            event.currentTarget.setPointerCapture(event.pointerId);
-          }}
-          onPointerMove={(event) => {
-            const drag = dragRef.current;
-            if (!drag || drag.pointerId !== event.pointerId) return;
-            setDragY(Math.max(0, event.clientY - drag.startY));
-          }}
-          onPointerUp={(event) => {
-            const drag = dragRef.current;
-            if (!drag || drag.pointerId !== event.pointerId) return;
-            const distance = Math.max(0, event.clientY - drag.startY);
-            const velocity = distance / Math.max(1, performance.now() - drag.startTime);
-            dragRef.current = null;
-            if (distance >= 72 || (distance >= 28 && velocity > 0.55)) requestClose();
-            else setDragY(0);
-          }}
-          onPointerCancel={() => { dragRef.current = null; setDragY(0); }}
-        />
+        <div className="sheet-handle" aria-label="Swipe down to close" />
         {children}
       </div>
     </div>
