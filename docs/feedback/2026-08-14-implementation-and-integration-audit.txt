@@ -1,0 +1,303 @@
+TG TUNES - IMPLEMENTATION AND INTEGRATION AUDIT
+Date: 14 August 2026
+Branch: codex/player-control-regressions
+Audited commit: 5516659a9a6cfce6a049f69599231bd18718937f
+Pull request: https://github.com/up4i/tunesontg/pull/3
+
+SUMMARY
+
+The pushed branch is synchronized with GitHub, the working tree was clean before
+this report was created, and pull request #3 is open, mergeable, and awaiting
+review from up4i.
+
+The new playback, public-playlist, collaboration, safety, folder, Undo, and
+recommendation work generally integrates correctly with the older library,
+playlist, profile, sharing, queue, and import features.
+
+One important first-run playback conflict was found during the rendered audit:
+
+HIGH - A new user starts with the volume at 0%.
+
+- The volume initialization converts a missing localStorage value with
+  Number(null), which becomes 0. The validation then accepts 0 as a legitimate
+  saved volume instead of using the intended 100% default.
+- The fresh-session UI displayed a 0% volume slider while the button still said
+  "Mute".
+- This can make Play, Next, Previous, queue changes, and restored playback appear
+  not to work because the audio starts silently.
+- Recommended correction: check whether the stored value is null before parsing
+  it, and use 1 as the first-run default. Add a browser/component regression test
+  for a user with no tune:volume key.
+- This audit reports the defect; it does not change product code.
+
+No other integration blocker was found in the audited paths.
+
+
+INTERFERENCE AND REGRESSION RESULTS
+
+PASS - Playback state and older queue behavior
+
+- Stable queue restoration preserves ordering, position, repeat, and shuffle.
+- Queue storage is scoped to the current user, preventing one Telegram account's
+  queue from leaking into another account on the same device.
+- Collaborator-owned and public tracks can be resolved through stable track IDs.
+- Deleted, blocked, private, or otherwise unavailable tracks are removed or
+  skipped cleanly instead of leaving playback stuck.
+- The compact player remains visible when moving between Home, Library,
+  Playlists, and Profile.
+- Explicit playback errors and Retry appear instead of an indefinite wait.
+- The repeat control cycles through all three states:
+  Off -> Repeat all -> Repeat song -> Off.
+- The Repeat song state displays the small "1" indicator.
+- The Now Playing surface is fixed-height with overflow hidden, so it does not
+  expose the previous empty/blue scrolling area.
+- The tested player had no CSS filter or backdrop-filter on the main Now Playing
+  surface, avoiding the desktop blur regression.
+
+PASS - Public playback, privacy, and collaboration boundaries
+
+- Every authenticated user can play a public playlist without copying it into
+  their library or joining as a collaborator.
+- Public previews use signed stream and artwork URLs.
+- Public/private visibility and collaboration are separate settings.
+- An owner can pause collaboration without changing playlist visibility.
+- An owner can remove one collaborator while leaving followers unaffected.
+- Existing private collaborators retain explicit access until the owner removes
+  them; new collaboration joins still require an eligible public link.
+- Blocking removes cross-user follows/collaboration and prevents shared-profile,
+  shared-playlist, stream, artwork, history, queue-resolution, shared-import, and
+  Telegram handoff access.
+- Revoked public/collaborator access is reconciled with restored queues.
+- Safety controls are hidden on the user's own shared profile and playlist.
+
+PASS - Collaboration activity and notification safety
+
+- Playlist activity records who added or removed each track.
+- Repetitive activity notifications are grouped by actor, playlist, and event
+  type within a five-minute window.
+- Users can independently disable collaboration-activity and playlist-update
+  notifications.
+- Follow, collaboration-join, and report actions are rate-limited.
+- Repeated no-op joins do not create notification spam.
+- Owners can remove individual collaborators and collaborators receive a clear
+  notification.
+- Profile and playlist reporting are available.
+- Blocking and unblocking are available from shared surfaces and Profile.
+
+PASS - Folders, Undo, recommendations, and older playlist operations
+
+- Playlist folders are browsable through All playlists, individual folders, and
+  Unfiled filters.
+- An empty folder has a useful empty state.
+- Folder editing is a separate control, avoiding nested interactive elements.
+- Deleting the active folder resets the active filter safely.
+- Undo is supported after removing tracks from a playlist, moving tracks, and
+  leaving a collaborative playlist.
+- Move operations do not remove tracks that already existed in the destination
+  playlist.
+- Wording clearly separates "Remove from this playlist," "Save to My Library,"
+  and "Delete audio everywhere."
+- Collaborator-owned and public songs display ownership/access indicators.
+- Recommendations state why they were suggested and can be dismissed.
+- Recommendations remain limited to playable music in the listener's own
+  library.
+- Existing editable playlist name, description, cover, visibility, collaboration,
+  song count, duration, and deletion behavior remain covered by passing tests.
+
+PASS - Loading, offline, sheets, and responsive layout
+
+- UTYA loading branding and markup were removed.
+- Neutral skeletons and explicit loading, empty, offline, error, retry, and
+  unavailable states are present.
+- The bug-report sheet replaces the current sheet instead of stacking duplicate
+  overlays.
+- A 390 x 844 mobile audit found no horizontal overflow.
+- Swipe-down dismissal worked when dragging the visible sheet handle.
+- Button-driven sheet closure completed smoothly in approximately 285 ms.
+- The Profile notification preference controls updated without interfering with
+  the persistent player.
+- The fresh browser console contained no warnings or errors.
+
+PASS - Older data behavior protected by the automated suite
+
+- Liked Songs is created once and liking is idempotent.
+- Duplicate Telegram files are detected instead of being imported twice.
+- Similar metadata produces a warning without incorrectly blocking the import.
+- Ten-minute and hosted Bot API size limits remain enforced.
+- Telegram profile photos survive updates that omit a new photo.
+- Listening history records plays without duplicate history rows.
+- Shared songs can be previewed and saved without duplicate copies.
+- Only public playlists open through public share links.
+- Song metadata, playlist details, and custom artwork remain editable.
+- Playlist deletion retains library songs.
+- Removing a song from My Library cascades intentionally to playlists and
+  listening history.
+- Bulk like, add, move, remove, share, and deletion data paths remain
+  transactional.
+- Telegram queue handoff still rejects empty or oversized requests.
+- Bot imports still report progress and finish with a song deep link.
+
+
+EVERYTHING IMPLEMENTED TODAY
+
+Playback and reliability
+
+1. Removed UTYA loading branding and replaced it with neutral loading skeletons.
+2. Added preloading for the current track and the next track.
+3. Added stable queue restoration through /api/tracks/resolve.
+4. Extended restored queues to support owned, collaborator-owned, and public
+   tracks.
+5. Changed player persistence to a user-scoped v2 localStorage key.
+6. Preserved playback position on pagehide and Telegram visibility changes.
+7. Added graceful skipping/removal for unavailable or deleted restored tracks.
+8. Added an explicit playback-error state with a Retry action.
+9. Added playback-error text to the compact persistent player.
+10. Kept the compact player available on every main tab.
+11. Added current/next audio range priming to reduce startup latency.
+12. Retained and surfaced tap-to-audio timing telemetry.
+13. Added the seven-day average playback-start time to Profile health metrics.
+14. Added direct playback controls to public shared-playlist previews.
+15. Added signed public stream and artwork URLs.
+16. Allowed authenticated listeners to queue and play every public playlist.
+17. Reconciled queues when public/collaborator/block access is revoked.
+18. Allowed eligible public plays to participate in listening history while
+    access remains valid.
+
+Collaboration controls
+
+19. Separated playlist visibility from collaboration status.
+20. Allowed collaboration to be enabled or disabled independently of privacy.
+21. Preserved explicit access for existing private collaborators.
+22. Required an eligible public link for a new collaborator to join.
+23. Added owner controls to remove an individual collaborator.
+24. Added collaborator roster display with avatar, join time, and Remove action.
+25. Added collaborator-removal notifications.
+26. Preserved playlist following independently when collaboration is removed.
+27. Added a per-track activity log for song additions and removals.
+28. Recorded the actor responsible for each playlist activity event.
+29. Added reversible collaboration departures for Undo.
+
+Notifications, blocking, reporting, and anti-abuse
+
+30. Grouped repetitive activity notifications by actor, playlist, and event type.
+31. Added an event count such as "2 updates" to grouped notifications.
+32. Added notification preferences for collaboration activity.
+33. Added notification preferences for playlist detail/status updates.
+34. Added persistent notification preference storage and API support.
+35. Added follow throttling.
+36. Added collaboration invitation/join throttling.
+37. Added report-submission throttling.
+38. Prevented repeated no-op joins from generating notifications.
+39. Added profile reporting.
+40. Added playlist reporting.
+41. Added content-report persistence and a reporting API.
+42. Added symmetric user blocking.
+43. Made blocking remove follows and collaboration relationships.
+44. Made blocking hide profiles, playlists, songs, history, and queues across the
+    blocked relationship.
+45. Integrated block checks into streaming and artwork access.
+46. Integrated block checks into queue resolution and shared-song imports.
+47. Integrated block checks into listening-history/library visibility and
+    Telegram queue handoff.
+48. Added a blocked-users management section with Unblock in Profile.
+49. Added Block and Report actions to shared profile/playlist surfaces.
+50. Hid Block/Report safety actions on the user's own shared content.
+
+Folders, Undo, ownership, and recommendations
+
+51. Made playlist folders browsable.
+52. Added All playlists, per-folder, and Unfiled filters.
+53. Added a dedicated empty-folder state.
+54. Added a separate folder Edit button.
+55. Reset the active filter safely when its folder is deleted.
+56. Added Undo after removing one track from a playlist.
+57. Added Undo after removing multiple tracks from a playlist.
+58. Added Undo after moving tracks between playlists.
+59. Added Undo after leaving a collaborative playlist.
+60. Added server-side restore actions with a ten-minute validity window.
+61. Protected move operations when a track already exists at the destination.
+62. Clarified "Remove from this playlist."
+63. Clarified "Save to My Library."
+64. Clarified "Delete audio everywhere" and its library/playlist/history impact.
+65. Added ownership indicators for collaborator-owned and public tracks.
+66. Added explainable recommendations such as "Because you liked...".
+67. Added persistent recommendation dismissal.
+68. Kept recommendations restricted to playable tracks in the user's library.
+
+Loading and interaction states
+
+69. Added an app-wide offline banner.
+70. Added explicit neutral loading states.
+71. Added empty states for the new folder/social surfaces.
+72. Added retry states for failed playback/data actions.
+73. Improved unavailable-track messaging.
+74. Changed the reporting transition so the report sheet does not stack over the
+    shared-content sheet.
+
+Database and API work
+
+75. Added notification_preferences storage.
+76. Added playlist_activity storage.
+77. Added user_blocks storage.
+78. Added content_reports storage.
+79. Added recommendation_dismissals storage.
+80. Added user_actions storage for abuse throttles.
+81. Added collaboration_departures storage for reversible leaves.
+82. Added activity_notifications event_type and event_count migrations.
+83. Added /api/preferences.
+84. Added /api/recommendations/[trackId].
+85. Added /api/playlists/[id]/collaborators/[publicId].
+86. Added /api/profiles/[publicId]/block.
+87. Added /api/reports.
+88. Added /api/tracks/resolve.
+89. Added playlist-track restore support to the playlist tracks route.
+90. Added collaboration restore support to the collaborate route.
+91. Added access/block enforcement to public profile and shared-content routes.
+
+Tests and documentation
+
+92. Added queue restoration coverage for unavailable tracks.
+93. Added public-playback, access-revocation, activity-log, and Undo coverage.
+94. Added notification preference, blocking, reporting, and recommendation
+    dismissal coverage.
+95. Updated the README with the new playback, public-playlist, collaboration,
+    safety, folder, Undo, recommendation, and diagnostics behavior.
+
+
+VALIDATION PERFORMED ON THE COMBINED PROJECT
+
+- npm run typecheck: PASS
+- npm run lint: PASS
+- npm test -- --runInBand: PASS, 34 of 34 tests
+- npm run build: PASS, optimized Next.js production build
+- Desktop rendered smoke test: PASS except for the first-run volume defect above
+- Mobile rendered smoke test at 390 x 844: PASS
+- Swipe-down sheet dismissal: PASS
+- Smooth close transition: PASS, approximately 285 ms
+- Three-state repeat cycle: PASS
+- Folder create/filter/empty state: PASS
+- Notification preference update: PASS
+- Persistent player across tabs: PASS
+- Explicit playback error and retry presentation: PASS
+- Now Playing scroll lock and no blur filters: PASS
+- Browser console warnings/errors: PASS, none observed
+
+
+LIMITS OF THIS AUDIT
+
+- The rendered playback test used a deliberately invalid Telegram file ID so the
+  authorized stream-proxy failure and Retry UI could be exercised safely. It did
+  not prove audible production playback through the deployed bot token.
+- A final real-device Telegram test should use a valid imported song and confirm
+  audible Play, Next, Previous, repeat, queue restoration after minimize/restore,
+  and public-playlist playback under two real Telegram accounts.
+- GitHub currently reports no configured automated status checks on pull request
+  #3. The commands above were run locally.
+
+FINAL VERDICT
+
+The new additions do not show a broad architectural conflict with the existing
+project. The automated data/access tests and rendered interaction tests are
+otherwise clean. The first-run 0% volume initialization is a release-impacting
+playback regression and should be fixed before treating the branch as fully
+ready for production review.
