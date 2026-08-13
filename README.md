@@ -11,10 +11,11 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Per-user libraries validated from signed Telegram Mini App `initData`
 - Searchable, responsive music UI with automatic Telegram light/dark themes and safe-area support
 - Telegram profile photos with an initial-based fallback
-- Playlist creation, editable names/descriptions/preset covers, searchable bulk add, remove, delete, play, and shuffle
+- Playlist creation, editable names/descriptions/custom covers, searchable bulk add, remove, delete, play, and shuffle
 - A protected, default Liked Songs collection
-- Full now-playing UI with pause, seek, previous/next, repeat, and queue state
+- Full now-playing UI with pause, seek, previous/next, shuffle, and three-state repeat
 - Editable queue with reorder, remove, clear, jump-to-track, and Play Next controls
+- Queue, current position, shuffle, and repeat persist across Mini App restarts
 - Durable listening history with Recently Played
 - Telegram album-cover thumbnails when the incoming audio includes one
 - Stateless, Range-aware Telegram streaming for seeking without audio storage
@@ -24,7 +25,10 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Webhook secret validation and user-scoped database queries
 - Exact Telegram-file duplicate prevention plus conservative title/artist/duration warnings
 - Direct song and public-playlist sharing through validated Mini App deep links
-- Recipient add-to-library prompts and public/private playlist controls
+- Recipient add-to-library prompts, exact playlist imports, and public/private playlist controls
+- Editable song titles, artists, and custom artwork with Telegram-artwork reset
+- Immediate bot import progress, explicit failure messages, and a visible 10-minute / 20 MB limit
+- Playback-start, buffering, retry, and import-health diagnostics visible in the Profile tab
 - Library and playlist multi-select for bulk add, move, like, share, send, remove, and delete actions
 - Confirmed removal from My Library, with playlist/history cleanup and live-queue reconciliation
 - Capability-checked Telegram Home Screen shortcuts, native haptic feedback, and in-app bug reports
@@ -42,7 +46,7 @@ The default experience is therefore a Mini App web-audio player:
 4. Byte-range requests are forwarded for seeking. The browser owns play/pause, queue, shuffle, repeat, and progress state.
 5. Telegram's direct file URL—and therefore the bot token—never reaches client code.
 
-This avoids permanent audio storage, but playback consumes server bandwidth. Telegram's hosted Bot API currently limits `getFile` downloads to 20 MB. Larger tracks need a local Telegram Bot API server or a separate storage/CDN decision.
+This avoids permanent audio storage, but playback consumes server bandwidth. Imports are limited to 10 minutes and 20 MB. Telegram's hosted Bot API currently limits `getFile` downloads to 20 MB. Larger tracks need a local Telegram Bot API server or a separate storage/CDN decision.
 
 The track menu retains **Send to Telegram player** as a low-bandwidth fallback. That copies the audio message into the bot chat for playback in Telegram's native player, but native playback cannot be controlled from the Mini App.
 
@@ -115,10 +119,12 @@ Use one running app instance while SQLite is the database. Mount `/app/data` on 
 src/app/                         Mini App and API route handlers
 src/app/api/telegram/webhook/    Telegram update ingestion
 src/app/api/play/                Native-player queue handoff
+src/app/api/playback-events/     Playback reliability telemetry
 src/app/api/tracks/              Signed audio and artwork streaming
 src/components/music-app.tsx     Mobile music product interface
 src/lib/auth.ts                  Telegram initData HMAC validation
 src/lib/db.ts                    SQLite schema and user-scoped data access
+src/lib/player-state.ts          Safe queue and position persistence
 src/lib/playback-ticket.ts       Expiring media URL signatures
 src/lib/telegram-media.ts        Range-aware stateless media proxy
 src/lib/telegram.ts              Minimal server-only Bot API client
@@ -129,8 +135,7 @@ scripts/set-webhook.ts           Bot webhook/menu bootstrap
 
 Tester reports and their triaged backlog live in [`docs/feedback`](docs/feedback). The current report is [Windows PC testing from 2026-08-06](docs/feedback/2026-08-06-gagster-windows.md).
 
-- Metadata editing for documents that arrive without artist/duration tags
-- Playlist rename and drag-to-reorder
+- Playlist drag-to-reorder
 - Pagination and Telegram-aware rate limiting for large queues
 - Postgres migration before horizontal scaling
 - Inline mode for sharing a saved track into another chat

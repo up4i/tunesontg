@@ -1,6 +1,5 @@
 import { callTelegram, telegramFileUrl } from "@/lib/telegram";
-
-const MAX_BOT_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+import { MAX_TELEGRAM_DOWNLOAD_BYTES } from "@/lib/media-limits";
 
 type TelegramFile = {
   file_id: string;
@@ -53,7 +52,7 @@ export async function proxyTelegramFile(
     artwork?: boolean;
   },
 ): Promise<Response> {
-  if (input.knownSize && input.knownSize > MAX_BOT_DOWNLOAD_BYTES) {
+  if (input.knownSize && input.knownSize > MAX_TELEGRAM_DOWNLOAD_BYTES) {
     throw new MediaProxyError(
       "This file is over Telegram's 20 MB Bot API streaming limit.",
       413,
@@ -64,7 +63,7 @@ export async function proxyTelegramFile(
   if (!telegramFile.file_path) {
     throw new MediaProxyError("Telegram did not return a downloadable file path.");
   }
-  if (telegramFile.file_size && telegramFile.file_size > MAX_BOT_DOWNLOAD_BYTES) {
+  if (telegramFile.file_size && telegramFile.file_size > MAX_TELEGRAM_DOWNLOAD_BYTES) {
     throw new MediaProxyError(
       "This file is over Telegram's 20 MB Bot API streaming limit.",
       413,

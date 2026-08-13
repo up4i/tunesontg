@@ -1,8 +1,17 @@
-import { MAX_TRACK_DURATION_SECONDS, saveTrackWithStatus, upsertUser, type IncomingTrack } from "@/lib/db";
-import { appUrl, callTelegram } from "@/lib/telegram";
+import { createTrackShare, recordImportEvent, saveTrackWithStatus, upsertUser, type IncomingTrack } from "@/lib/db";
+import { formatUploadLimits, MAX_TELEGRAM_DOWNLOAD_BYTES, MAX_TRACK_DURATION_SECONDS } from "@/lib/media-limits";
+import { appUrl, callTelegram, miniAppDeepLink } from "@/lib/telegram";
 import type { TelegramUser } from "@/lib/types";
 
 export const runtime = "nodejs";
+
+type TelegramPhotoSize = {
+  file_id: string;
+  file_unique_id: string;
+  width: number;
+  height: number;
+  file_size?: number;
+};
 
 type TelegramAudio = {
   file_id: string;
@@ -14,14 +23,6 @@ type TelegramAudio = {
   mime_type?: string;
   file_size?: number;
   thumbnail?: TelegramPhotoSize;
-};
-
-type TelegramPhotoSize = {
-  file_id: string;
-  file_unique_id: string;
-  width: number;
-  height: number;
-  file_size?: number;
 };
 
 type TelegramDocument = {
@@ -111,11 +112,20 @@ function incomingTrack(message: TelegramMessage): IncomingTrack | null {
 async function sendWelcome(chatId: number, firstName: string): Promise<void> {
   await callTelegram("sendMessage", {
     chat_id: chatId,
-    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me a Music/Audio track up to 10 minutes long and I’ll add it to your library. Open the app to build playlists and play your music without leaving Telegram.`,
+    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me a Music/Audio track up to ${formatUploadLimits()} and I’ll add it to your library. Open the app to build playlists and play your music without leaving Telegram.`,
     reply_markup: {
       inline_keyboard: [[{ text: "Open my library", web_app: { url: appUrl() } }]],
     },
   });
+}
+
+async function finishImportMessage(chatId: number, messageId: number, text: string, url?: string): Promise<void> {
+  const action = url ? { reply_markup: { inline_keyboard: [[{ text: "View song", url }]] } } : {};
+  try {
+    await callTelegram("editMessageText", { chat_id: chatId, message_id: messageId, text, ...action });
+  } catch {
+    await callTelegram("sendMessage", { chat_id: chatId, text, ...action });
+  }
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -148,9 +158,10 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (!message.audio && isAudioDocument(message.document)) {
+      recordImportEvent(message.from, "failed", "duration_unknown");
       await callTelegram("sendMessage", {
         chat_id: message.chat.id,
-        text: "Please send this using Telegram’s Music/Audio option instead of as a document. That lets me verify the 10-minute song limit before adding it.",
+        text: "Please send this using Telegram’s Music/Audio option instead of as a document. That lets me verify the 10-minute limit before adding it.",
         reply_to_message_id: message.message_id,
       });
       return Response.json({ ok: true, rejected: "duration_unknown" });
@@ -159,32 +170,55 @@ export async function POST(request: Request): Promise<Response> {
     const trackInput = incomingTrack(message);
     if (trackInput) {
       if (trackInput.duration > MAX_TRACK_DURATION_SECONDS) {
+        recordImportEvent(message.from, "failed", "duration_limit");
         await callTelegram("sendMessage", {
           chat_id: message.chat.id,
-          text: "This song is longer than 10 minutes, so I couldn’t add it. Please send an audio track that is 10 minutes or shorter.",
+          text: "This song is longer than 10 minutes, so I couldn’t add it. Please send a shorter track.",
           reply_to_message_id: message.message_id,
         });
         return Response.json({ ok: true, rejected: "duration_limit" });
       }
-      const { track, created, possibleDuplicate } = saveTrackWithStatus(message.from, trackInput);
-      await callTelegram("sendMessage", {
+      if (trackInput.fileSize && trackInput.fileSize > MAX_TELEGRAM_DOWNLOAD_BYTES) {
+        recordImportEvent(message.from, "failed", "file_size_limit");
+        await callTelegram("sendMessage", {
+          chat_id: message.chat.id,
+          text: "This song is over Telegram’s 20 MB streaming limit, so I couldn’t add it. Please send a smaller audio file.",
+          reply_to_message_id: message.message_id,
+        });
+        return Response.json({ ok: true, rejected: "file_size_limit" });
+      }
+
+      const progress = await callTelegram<{ message_id: number }>("sendMessage", {
         chat_id: message.chat.id,
-        text: created
-          ? possibleDuplicate
-            ? `Saved “${track.title}” by ${track.artist}. It may duplicate “${possibleDuplicate.title}” by ${possibleDuplicate.artist}, so check your library when convenient.`
-            : `Saved “${track.title}” by ${track.artist} to your library.`
-          : `“${track.title}” by ${track.artist} is already in your library. I didn’t add a duplicate.`,
+        text: "Checking the track, metadata, and duplicates…",
         reply_to_message_id: message.message_id,
-        reply_markup: {
-          inline_keyboard: [[{ text: "View in library", web_app: { url: appUrl() } }]],
-        },
       });
+      try {
+        const { track, created, possibleDuplicate } = saveTrackWithStatus(message.from, trackInput);
+        recordImportEvent(message.from, created ? "imported" : "duplicate");
+        const shareId = createTrackShare(message.from, track.id);
+        const resultText = created
+          ? possibleDuplicate
+            ? `Saved “${track.title}” by ${track.artist}. It may duplicate “${possibleDuplicate.title}” by ${possibleDuplicate.artist}; open the song to review its details.`
+            : `Saved “${track.title}” by ${track.artist} to your library.`
+          : `“${track.title}” by ${track.artist} is already in your library. I didn’t add a duplicate.`;
+        await finishImportMessage(message.chat.id, progress.message_id, resultText, miniAppDeepLink(`s_${shareId}`));
+      } catch (importError) {
+        console.error("Track import failed", importError);
+        recordImportEvent(message.from, "failed", "import_failed");
+        await finishImportMessage(
+          message.chat.id,
+          progress.message_id,
+          "I couldn’t add this track. Verify that it is Music/Audio within 10 minutes and 20 MB, then try again.",
+        );
+        return Response.json({ ok: true, rejected: "import_failed" });
+      }
       return Response.json({ ok: true });
     }
 
     await callTelegram("sendMessage", {
       chat_id: message.chat.id,
-      text: "Send me a Telegram Music/Audio track up to 10 minutes long, and I’ll save it to your library.",
+      text: `Send me a Telegram Music/Audio track up to ${formatUploadLimits()}, and I’ll save it to your library.`,
       reply_markup: {
         inline_keyboard: [[{ text: "Open library", web_app: { url: appUrl() } }]],
       },

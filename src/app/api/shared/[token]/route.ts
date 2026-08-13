@@ -2,6 +2,7 @@ import { AuthenticationError, getAuthenticatedUser } from "@/lib/auth";
 import {
   getSharedPlaylistPreview,
   getSharedSongPreview,
+  importSharedPlaylist,
   importSharedSong,
 } from "@/lib/db";
 
@@ -21,7 +22,7 @@ export async function GET(
     if (!validToken(token)) return Response.json({ error: "This shared link is invalid." }, { status: 400 });
     const preview = token.startsWith("s_")
       ? getSharedSongPreview(user, token.slice(2))
-      : getSharedPlaylistPreview(token.slice(2));
+      : getSharedPlaylistPreview(user, token.slice(2));
     if (!preview) return Response.json({ error: "This shared item is unavailable." }, { status: 404 });
     return Response.json(preview);
   } catch (error) {
@@ -37,8 +38,12 @@ export async function POST(
   try {
     const user = getAuthenticatedUser(request);
     const { token } = await context.params;
-    if (!/^s_[a-f\d]{32}$/.test(token)) {
-      return Response.json({ error: "Only shared songs can be added to your library." }, { status: 400 });
+    if (!validToken(token)) {
+      return Response.json({ error: "This shared link is invalid." }, { status: 400 });
+    }
+    if (token.startsWith("p_")) {
+      const result = importSharedPlaylist(user, token.slice(2));
+      return Response.json(result);
     }
     const result = importSharedSong(user, token.slice(2));
     return Response.json({

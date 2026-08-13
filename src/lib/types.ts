@@ -7,7 +7,9 @@ export type Track = {
   fileSize: number | null;
   addedAt: string;
   artworkSeed: number;
+  artworkRevision: string;
   hasArtwork: boolean;
+  hasCustomArtwork: boolean;
   playable: boolean;
   liked: boolean;
   streamUrl?: string;
@@ -37,6 +39,7 @@ export type SharedSongPreview = {
   artworkSeed: number;
   ownerName: string;
   alreadyAdded: boolean;
+  libraryTrackId: string | null;
 };
 
 export type SharedPlaylistPreview = {
@@ -49,6 +52,7 @@ export type SharedPlaylistPreview = {
   ownerName: string;
   trackCount: number;
   duration: number;
+  alreadyAdded: boolean;
   tracks: Array<Pick<Track, "title" | "artist" | "duration" | "artworkSeed">>;
 };
 
@@ -63,6 +67,18 @@ export type LibraryPayload = {
   tracks: Track[];
   recentlyPlayed: Track[];
   playlists: Playlist[];
+  playbackSummary: {
+    starts: number;
+    errors: number;
+    stalls: number;
+    recoveredRetries: number;
+    averageStartupMs: number | null;
+  };
+  importSummary: {
+    imported: number;
+    duplicates: number;
+    failed: number;
+  };
   demo: boolean;
 };
 

@@ -43,6 +43,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { encodePlayerState, restorePlayerState } from "@/lib/player-state";
 import type { LibraryPayload, Playlist, SharedPreview, Track } from "@/lib/types";
 
 type Tab = "home" | "library" | "playlists" | "profile";
@@ -50,7 +51,9 @@ type ThemeMode = "telegram" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type RepeatMode = "off" | "all" | "one";
 type Toast = { kind: "success" | "error"; message: string } | null;
+type PlaybackEventName = "play_request" | "playback_started" | "buffer_start" | "buffer_end" | "stream_error" | "retry_started" | "retry_recovered" | "skip";
 const primedStreamRequests = new Map<string, Promise<void>>();
+const PLAYER_STATE_KEY = "tune:player-state:v1";
 
 function haptic(kind: "selection" | "success" | "error" = "selection") {
   const webApp = window.Telegram?.WebApp;
@@ -133,7 +136,7 @@ function randomized<T>(items: T[]): T[] {
   return result;
 }
 
-async function playlistCoverFromFile(file: File): Promise<string> {
+async function squareArtworkFromFile(file: File): Promise<string> {
   if (!/^image\/(?:jpeg|png|webp)$/.test(file.type)) {
     throw new Error("Choose a JPEG, PNG, or WebP image.");
   }
@@ -384,12 +387,21 @@ export function MusicApp() {
   const historyRecordedTrackRef = useRef<string | null>(null);
   const sharedParamHandledRef = useRef(false);
   const knownLibraryTrackIdsRef = useRef<Set<string> | null>(null);
+  const playerStateRestoredRef = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
+  const playbackSessionRef = useRef("");
+  const playIntentAtRef = useRef<number | null>(null);
+  const waitingAtRef = useRef<number | null>(null);
+  const playbackRetryRef = useRef<{ trackId: string; attempts: number }>({ trackId: "", attempts: 0 });
+  const retryTimerRef = useRef(0);
+  const currentTrackRef = useRef<Track | null>(null);
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [editPlaylistTarget, setEditPlaylistTarget] = useState<Playlist | null>(null);
+  const [editTrackTarget, setEditTrackTarget] = useState<Track | null>(null);
   const [addMusicPlaylistId, setAddMusicPlaylistId] = useState<string | null>(null);
   const [bulkPlaylistOpen, setBulkPlaylistOpen] = useState(false);
   const [deletePlaylistTarget, setDeletePlaylistTarget] = useState<Playlist | null>(null);
@@ -413,6 +425,7 @@ export function MusicApp() {
   const [sharedLoading, setSharedLoading] = useState(false);
   const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [repeatMode, setRepeatMode] = useState<RepeatMode>("off");
+  const [bufferingMessage, setBufferingMessage] = useState<string | null>(null);
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -579,6 +592,30 @@ export function MusicApp() {
     return (library?.tracks ?? []).filter((track) => selected.has(track.id));
   }, [library?.tracks, selectedTrackIds]);
   const currentTrack = queue[queueIndex] ?? null;
+  useEffect(() => {
+    currentTrackRef.current = currentTrack;
+  }, [currentTrack]);
+
+  const recordPlaybackEvent = useCallback((
+    event: PlaybackEventName,
+    trackId: string | null,
+    details: { startupMs?: number; positionSeconds?: number; detail?: string } = {},
+  ) => {
+    if (!playbackSessionRef.current) playbackSessionRef.current = crypto.randomUUID().replaceAll("-", "");
+    void fetch("/api/playback-events", {
+      method: "POST",
+      keepalive: true,
+      headers: { "content-type": "application/json", "x-telegram-init-data": initData() },
+      body: JSON.stringify({
+        events: [{
+          event,
+          trackId,
+          sessionId: playbackSessionRef.current,
+          ...details,
+        }],
+      }),
+    }).catch(() => { /* Diagnostics must never interrupt playback. */ });
+  }, []);
   const filteredTracks = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     if (!query) return library?.tracks ?? [];
@@ -615,6 +652,52 @@ export function MusicApp() {
   }, [library]);
 
   useEffect(() => {
+    if (!library || playerStateRestoredRef.current) return;
+    playerStateRestoredRef.current = true;
+    const restored = restorePlayerState(window.localStorage.getItem(PLAYER_STATE_KEY), library.tracks);
+    if (!restored) return;
+    const timer = window.setTimeout(() => {
+      setQueue(restored.queue);
+      setQueueIndex(restored.queueIndex);
+      setPlaybackStack(restored.playbackStack);
+      setShuffleEnabled(restored.shuffleEnabled);
+      setRepeatMode(restored.repeatMode);
+      setCurrentTime(restored.currentTime);
+      setMediaDuration(restored.queue[restored.queueIndex].duration);
+      pendingSeekRef.current = restored.currentTime;
+      const audio = audioRef.current;
+      const track = restored.queue[restored.queueIndex];
+      if (audio && track.streamUrl) audio.src = track.streamUrl;
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [library]);
+
+  useEffect(() => {
+    if (!library || !playerStateRestoredRef.current || !queue.length || !currentTrack) return;
+    const timer = window.setTimeout(() => {
+      window.localStorage.setItem(PLAYER_STATE_KEY, encodePlayerState({
+        queueIds: queue.map((track) => track.id),
+        currentTrackId: currentTrack.id,
+        playbackStackIds: playbackStack.map((track) => track.id),
+        currentTime,
+        shuffleEnabled,
+        repeatMode,
+      }));
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [currentTime, currentTrack, library, playbackStack, queue, repeatMode, shuffleEnabled]);
+
+  useEffect(() => {
+    if (!library || !playerStateRestoredRef.current) return;
+    const tracksById = new Map(library.tracks.map((track) => [track.id, track]));
+    const timer = window.setTimeout(() => {
+      setQueue((current) => current.map((track) => tracksById.get(track.id) ?? track));
+      setPlaybackStack((current) => current.map((track) => tracksById.get(track.id) ?? track));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [library]);
+
+  useEffect(() => {
     const candidates = [
       queue[queueIndex + 1],
       queue[queueIndex + 2],
@@ -638,24 +721,36 @@ export function MusicApp() {
     };
   }, [refreshLibraryInBackground]);
 
-  const activateTrack = useCallback((track: Track, autoplay = true) => {
+  const activateTrack = useCallback((
+    track: Track,
+    autoplay = true,
+    startAt = 0,
+    reason: "play" | "next" | "previous" | "queue" = "play",
+  ) => {
     const audio = audioRef.current;
     if (!audio || !track.streamUrl) return;
+    window.clearTimeout(retryTimerRef.current);
+    playbackRetryRef.current = { trackId: track.id, attempts: 0 };
+    pendingSeekRef.current = startAt;
     if (audio.getAttribute("src") !== track.streamUrl) {
       audio.src = track.streamUrl;
     }
-    audio.currentTime = 0;
-    setCurrentTime(0);
+    try { audio.currentTime = startAt; } catch { /* Applied again after metadata loads. */ }
+    setCurrentTime(startAt);
     setMediaDuration(track.duration);
     historyRecordedTrackRef.current = null;
     if (autoplay) {
+      playIntentAtRef.current = performance.now();
+      setBufferingMessage("Starting…");
+      recordPlaybackEvent("play_request", track.id, { positionSeconds: startAt, detail: reason });
       setIsPlaying(true);
       void audio.play().catch(() => {
         setIsPlaying(false);
+        setBufferingMessage(null);
         setToast({ kind: "error", message: "Tap play once more to start audio." });
       });
     }
-  }, []);
+  }, [recordPlaybackEvent]);
 
   useEffect(() => {
     if (!currentTrack || !isPlaying || historyRecordedTrackRef.current === currentTrack.id) return;
@@ -701,8 +796,15 @@ export function MusicApp() {
     playAt(nextQueue, nextIndex);
   }, [playAt]);
 
-  const advanceTrack = useCallback((direction: 1 | -1) => {
+  const advanceTrack = useCallback((direction: 1 | -1, initiatedByUser = true) => {
     if (!queue.length) return;
+    const activeTrack = queue[queueIndex];
+    if (initiatedByUser && activeTrack) {
+      recordPlaybackEvent("skip", activeTrack.id, {
+        positionSeconds: audioRef.current?.currentTime ?? 0,
+        detail: direction === 1 ? "next" : "back",
+      });
+    }
     if (direction === 1) {
       if (queue.length === 1) {
         if (repeatMode === "all") {
@@ -710,7 +812,7 @@ export function MusicApp() {
           setQueue(cycle);
           setQueueIndex(0);
           setPlaybackStack([]);
-          activateTrack(cycle[0]);
+          activateTrack(cycle[0], true, 0, "next");
           haptic();
           return;
         }
@@ -726,15 +828,15 @@ export function MusicApp() {
       setPlaybackStack((current) => [...current.slice(-49), oldTrack]);
       setQueue(nextQueue);
       setQueueIndex(Math.max(0, nextIndex));
-      activateTrack(nextTrack);
+      activateTrack(nextTrack, true, 0, "next");
       haptic();
       return;
     }
     const nextIndex = (queueIndex + direction + queue.length) % queue.length;
     setQueueIndex(nextIndex);
-    activateTrack(queue[nextIndex]);
+    activateTrack(queue[nextIndex], true, 0, "next");
     haptic();
-  }, [activateTrack, playbackStack, queue, queueIndex, repeatMode]);
+  }, [activateTrack, playbackStack, queue, queueIndex, recordPlaybackEvent, repeatMode]);
 
   const previousTrack = useCallback(() => {
     const audio = audioRef.current;
@@ -752,14 +854,15 @@ export function MusicApp() {
       return;
     }
     const active = queue[queueIndex];
+    if (active) recordPlaybackEvent("skip", active.id, { positionSeconds: audio?.currentTime ?? 0, detail: "previous" });
     const nextQueue = [previous, ...queue.filter((track) => track.id !== previous.id)];
     if (active && !nextQueue.some((track) => track.id === active.id)) nextQueue.push(active);
     setPlaybackStack((current) => current.slice(0, -1));
     setQueue(nextQueue);
     setQueueIndex(0);
-    activateTrack(previous);
+    activateTrack(previous, true, 0, "previous");
     haptic();
-  }, [activateTrack, playbackStack, queue, queueIndex]);
+  }, [activateTrack, playbackStack, queue, queueIndex, recordPlaybackEvent]);
 
   const selectQueueTrack = useCallback((index: number) => {
     if (index === queueIndex || index < 0 || index >= queue.length) return;
@@ -768,22 +871,29 @@ export function MusicApp() {
     const nextQueue = queue.filter((_, itemIndex) => itemIndex !== queueIndex);
     const nextIndex = nextQueue.findIndex((track) => track.id === selected.id);
     setPlaybackStack((current) => [...current.slice(-49), oldTrack]);
+    recordPlaybackEvent("skip", oldTrack.id, { positionSeconds: audioRef.current?.currentTime ?? 0, detail: "queue" });
     setQueue(nextQueue);
     setQueueIndex(Math.max(0, nextIndex));
-    activateTrack(selected);
+    activateTrack(selected, true, 0, "queue");
     haptic();
-  }, [activateTrack, queue, queueIndex]);
+  }, [activateTrack, queue, queueIndex, recordPlaybackEvent]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrack) return;
     if (audio.paused) {
-      void audio.play().catch(() => setToast({ kind: "error", message: "Audio could not start." }));
+      playIntentAtRef.current = performance.now();
+      setBufferingMessage("Starting…");
+      recordPlaybackEvent("play_request", currentTrack.id, { positionSeconds: audio.currentTime, detail: "resume" });
+      void audio.play().catch(() => {
+        setBufferingMessage(null);
+        setToast({ kind: "error", message: "Audio could not start." });
+      });
     } else {
       audio.pause();
     }
     haptic();
-  }, [currentTrack]);
+  }, [currentTrack, recordPlaybackEvent]);
 
   const seekTo = useCallback((seconds: number) => {
     const audio = audioRef.current;
@@ -912,6 +1022,8 @@ export function MusicApp() {
     setCurrentTime(0);
     setMediaDuration(0);
     setIsPlaying(false);
+    setBufferingMessage(null);
+    window.localStorage.removeItem(PLAYER_STATE_KEY);
     setQueueOpen(false);
     setPlayerOpen(false);
     haptic();
@@ -1096,6 +1208,36 @@ export function MusicApp() {
       });
     } catch (mutationError) {
       setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not add shared song." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
+  function openSharedSong() {
+    if (!library || sharedPreview?.type !== "song" || !sharedPreview.libraryTrackId) return;
+    const index = library.tracks.findIndex((track) => track.id === sharedPreview.libraryTrackId);
+    if (index < 0) return;
+    setSharedPreview(null);
+    startInAppQueue(library.tracks, false, index);
+    setPlayerOpen(true);
+  }
+
+  async function addSharedPlaylist() {
+    if (!sharedPreview || sharedPreview.type !== "playlist") return;
+    setMutating(true);
+    try {
+      const result = await api<{ playlistId: string; created: boolean; addedTracks: number }>(`/api/shared/p_${sharedPreview.shareId}`, { method: "POST" });
+      await loadLibrary();
+      setSharedPreview(null);
+      setSelectedPlaylistId(result.playlistId);
+      setTab("playlists");
+      haptic("success");
+      setToast({
+        kind: "success",
+        message: result.created ? `Playlist added with ${result.addedTracks} songs` : "Playlist is already in your library",
+      });
+    } catch (mutationError) {
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not add shared playlist." });
     } finally {
       setMutating(false);
     }
@@ -1302,6 +1444,29 @@ export function MusicApp() {
     }
   }
 
+  async function updateTrackMetadata(
+    track: Track,
+    details: { title: string; artist: string; customArtwork: string | null | "keep" },
+  ) {
+    setMutating(true);
+    try {
+      await api(`/api/tracks/${track.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(details),
+      });
+      await loadLibrary();
+      setEditTrackTarget(null);
+      setTrackMenu(null);
+      haptic("success");
+      setToast({ kind: "success", message: "Song details updated" });
+    } catch (mutationError) {
+      haptic("error");
+      setToast({ kind: "error", message: mutationError instanceof Error ? mutationError.message : "Could not update song details." });
+    } finally {
+      setMutating(false);
+    }
+  }
+
   async function setSelectedLiked(liked: boolean) {
     if (!selectedTrackIds.length) return;
     setMutating(true);
@@ -1429,6 +1594,7 @@ export function MusicApp() {
           setIsPlaying(false);
           setQueueOpen(false);
           setPlayerOpen(false);
+          window.localStorage.removeItem(PLAYER_STATE_KEY);
           if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
         }
       } else {
@@ -1494,6 +1660,45 @@ export function MusicApp() {
     haptic();
   }
 
+  function handlePlaybackError() {
+    const audio = audioRef.current;
+    const track = currentTrackRef.current;
+    if (!audio?.getAttribute("src") || !track?.streamUrl) return;
+    const position = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    const previous = playbackRetryRef.current.trackId === track.id
+      ? playbackRetryRef.current.attempts
+      : 0;
+    recordPlaybackEvent("stream_error", track.id, {
+      positionSeconds: position,
+      detail: navigator.onLine ? `media-${audio.error?.code ?? "unknown"}` : "offline",
+    });
+    if (navigator.onLine && previous < 2) {
+      const attempts = previous + 1;
+      playbackRetryRef.current = { trackId: track.id, attempts };
+      pendingSeekRef.current = position;
+      setBufferingMessage(attempts === 1 ? "Reconnecting…" : "Retrying stream…");
+      recordPlaybackEvent("retry_started", track.id, { positionSeconds: position, detail: String(attempts) });
+      retryTimerRef.current = window.setTimeout(() => {
+        if (currentTrackRef.current?.id !== track.id || !audioRef.current) return;
+        const separator = track.streamUrl!.includes("?") ? "&" : "?";
+        audioRef.current.src = `${track.streamUrl}${separator}retry=${Date.now()}`;
+        playIntentAtRef.current = performance.now();
+        void audioRef.current.play().catch(() => { /* The media error handler reports the final result. */ });
+      }, attempts === 1 ? 250 : 750);
+      return;
+    }
+    setIsPlaying(false);
+    setBufferingMessage(null);
+    setToast({
+      kind: "error",
+      message: navigator.onLine
+        ? "This track could not be streamed after two retries."
+        : "You appear to be offline. Reconnect and press play again.",
+    });
+  }
+
+  useEffect(() => () => window.clearTimeout(retryTimerRef.current), []);
+
   if (error) {
     return (
       <div className="app-frame">
@@ -1514,12 +1719,55 @@ export function MusicApp() {
         ref={audioRef}
         preload="auto"
         onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onPlaying={(event) => {
+          const track = currentTrackRef.current;
+          const startupMs = playIntentAtRef.current === null ? null : Math.round(performance.now() - playIntentAtRef.current);
+          if (track && startupMs !== null) {
+            recordPlaybackEvent("playback_started", track.id, { startupMs, positionSeconds: event.currentTarget.currentTime });
+          }
+          if (track && playbackRetryRef.current.trackId === track.id && playbackRetryRef.current.attempts > 0) {
+            recordPlaybackEvent("retry_recovered", track.id, {
+              startupMs: startupMs ?? undefined,
+              positionSeconds: event.currentTarget.currentTime,
+              detail: String(playbackRetryRef.current.attempts),
+            });
+          }
+          playIntentAtRef.current = null;
+          waitingAtRef.current = null;
+          playbackRetryRef.current = { trackId: track?.id ?? "", attempts: 0 };
+          setBufferingMessage(null);
+          setIsPlaying(true);
+        }}
+        onPause={() => {
+          if (!audioRef.current?.ended) setIsPlaying(false);
+        }}
         onLoadedMetadata={(event) => {
           const duration = Number.isFinite(event.currentTarget.duration)
             ? event.currentTarget.duration
             : currentTrack?.duration ?? 0;
           setMediaDuration(duration);
+          if (pendingSeekRef.current !== null) {
+            const seek = Math.min(pendingSeekRef.current, Math.max(0, duration - 0.25));
+            try { event.currentTarget.currentTime = seek; } catch { /* Some media engines defer seeking. */ }
+            setCurrentTime(seek);
+            pendingSeekRef.current = null;
+          }
+        }}
+        onWaiting={(event) => {
+          setBufferingMessage(playIntentAtRef.current === null ? "Buffering…" : "Starting…");
+          if (playIntentAtRef.current === null && waitingAtRef.current === null && currentTrackRef.current) {
+            waitingAtRef.current = performance.now();
+            recordPlaybackEvent("buffer_start", currentTrackRef.current.id, { positionSeconds: event.currentTarget.currentTime });
+          }
+        }}
+        onCanPlay={(event) => {
+          if (waitingAtRef.current !== null && currentTrackRef.current) {
+            recordPlaybackEvent("buffer_end", currentTrackRef.current.id, {
+              startupMs: Math.round(performance.now() - waitingAtRef.current),
+              positionSeconds: event.currentTarget.currentTime,
+            });
+            waitingAtRef.current = null;
+          }
         }}
         onTimeUpdate={(event) => {
           const audio = event.currentTarget;
@@ -1539,14 +1787,10 @@ export function MusicApp() {
             audioRef.current.currentTime = 0;
             void audioRef.current.play();
           } else {
-            advanceTrack(1);
+            advanceTrack(1, false);
           }
         }}
-        onError={() => {
-          if (!audioRef.current?.getAttribute("src")) return;
-          setIsPlaying(false);
-          setToast({ kind: "error", message: "This track could not be streamed from Telegram." });
-        }}
+        onError={handlePlaybackError}
       />
       {!library ? <Skeleton /> : (
         <>
@@ -1654,6 +1898,7 @@ export function MusicApp() {
             <MiniPlayer
               track={currentTrack}
               isPlaying={isPlaying}
+              bufferingMessage={bufferingMessage}
               progress={mediaDuration ? currentTime / mediaDuration : 0}
               onOpen={() => setPlayerOpen(true)}
               onToggle={togglePlayback}
@@ -1675,6 +1920,14 @@ export function MusicApp() {
           busy={mutating}
           onClose={() => setEditPlaylistTarget(null)}
           onSave={(details) => void updatePlaylistDetails(editPlaylistTarget, details)}
+        />
+      ) : null}
+      {editTrackTarget ? (
+        <EditTrackSheet
+          track={editTrackTarget}
+          busy={mutating}
+          onClose={() => setEditTrackTarget(null)}
+          onSave={(details) => void updateTrackMetadata(editTrackTarget, details)}
         />
       ) : null}
       {addMusicPlaylistId && library ? (
@@ -1768,6 +2021,8 @@ export function MusicApp() {
           busy={mutating}
           onClose={() => setSharedPreview(null)}
           onAddSong={() => void addSharedSong()}
+          onOpenSong={openSharedSong}
+          onAddPlaylist={() => void addSharedPlaylist()}
         />
       ) : null}
       {trackMenu && library ? (
@@ -1783,6 +2038,7 @@ export function MusicApp() {
           onSendTelegram={() => { setTrackMenu(null); void sendQueue([trackMenu.id]); }}
           onPlayNext={() => playTrackNext(trackMenu)}
           onToggleLiked={() => void toggleTrackLiked(trackMenu)}
+          onEdit={() => { setEditTrackTarget(trackMenu); setTrackMenu(null); }}
           onShare={() => void shareTrack(trackMenu)}
           onAdd={addToPlaylist}
           onRemove={selectedPlaylist && selectedPlaylist.kind === "standard"
@@ -1805,6 +2061,7 @@ export function MusicApp() {
           repeatMode={repeatMode}
           volume={volume}
           muted={muted}
+          bufferingMessage={bufferingMessage}
           onClose={() => setPlayerOpen(false)}
           onToggle={togglePlayback}
           onPrevious={previousTrack}
@@ -1995,7 +2252,7 @@ function HomeScreen({
 
       <div className="telegram-note">
         <span><Send /></span>
-        <div><strong>Streamed from Telegram</strong><p>Your audio stays on Telegram. Tune streams it only while you listen.</p></div>
+        <div><strong>Streamed from Telegram</strong><p>Send Music/Audio up to 10 minutes and 20 MB. Your audio stays on Telegram while tune streams it.</p></div>
       </div>
     </main>
   );
@@ -2126,6 +2383,22 @@ function ProfileScreen({ library }: { library: LibraryPayload }) {
         <h2>{displayName}</h2>
         <p>{library.user.username ? `@${library.user.username}` : "Telegram listener"}</p>
       </section>
+      <section className="playback-health-card">
+        <div><p className="eyebrow">Last 7 days</p><h2>Playback health</h2></div>
+        <dl>
+          <div><dt>Starts</dt><dd>{library.playbackSummary.starts}</dd></div>
+          <div><dt>Average start</dt><dd>{library.playbackSummary.averageStartupMs === null ? "—" : `${library.playbackSummary.averageStartupMs} ms`}</dd></div>
+          <div><dt>Buffer events</dt><dd>{library.playbackSummary.stalls}</dd></div>
+          <div><dt>Recovered</dt><dd>{library.playbackSummary.recoveredRetries}</dd></div>
+        </dl>
+        <p>{library.playbackSummary.errors ? `${library.playbackSummary.errors} stream errors recorded for diagnostics.` : "No stream errors recorded."}</p>
+        <h3>Bot imports</h3>
+        <dl className="import-health-stats">
+          <div><dt>Added</dt><dd>{library.importSummary.imported}</dd></div>
+          <div><dt>Duplicates</dt><dd>{library.importSummary.duplicates}</dd></div>
+          <div><dt>Failed</dt><dd>{library.importSummary.failed}</dd></div>
+        </dl>
+      </section>
       <section className="profile-coming-soon">
         <span><UserRound /></span>
         <p className="eyebrow">In development</p>
@@ -2235,12 +2508,14 @@ function PlaylistDetail({
 function MiniPlayer({
   track,
   isPlaying,
+  bufferingMessage,
   progress,
   onOpen,
   onToggle,
 }: {
   track: Track;
   isPlaying: boolean;
+  bufferingMessage: string | null;
   progress: number;
   onOpen: () => void;
   onToggle: () => void;
@@ -2249,7 +2524,7 @@ function MiniPlayer({
     <div className="mini-player">
       <button className="mini-player-main" onClick={onOpen} aria-label={`Open player for ${track.title}`}>
         <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />
-        <span><strong>{track.title}</strong><small>{track.artist}</small></span>
+        <span><strong>{track.title}</strong><small>{bufferingMessage ?? track.artist}</small></span>
       </button>
       <button className="mini-play-button" onClick={onToggle} aria-label={isPlaying ? "Pause" : "Play"}>
         {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
@@ -2271,6 +2546,7 @@ function NowPlaying({
   repeatMode,
   volume,
   muted,
+  bufferingMessage,
   onClose,
   onToggle,
   onPrevious,
@@ -2294,6 +2570,7 @@ function NowPlaying({
   repeatMode: RepeatMode;
   volume: number;
   muted: boolean;
+  bufferingMessage: string | null;
   onClose: () => void;
   onToggle: () => void;
   onPrevious: () => void;
@@ -2404,7 +2681,7 @@ function NowPlaying({
       <div className="now-playing-wash" />
       <header className="player-header">
         <button onClick={onClose} aria-label="Minimize player"><ChevronDown /></button>
-        <div><span>Now playing</span><strong>From your Telegram library · {queuePosition}/{queueLength}</strong></div>
+        <div><span>{bufferingMessage ?? "Now playing"}</span><strong>From your Telegram library · {queuePosition}/{queueLength}</strong></div>
         <button onClick={onMore} aria-label={`More options for ${track.title}`}><MoreHorizontal /></button>
       </header>
       <div className="player-content">
@@ -2726,7 +3003,7 @@ function EditPlaylistSheet({
                 if (!file) return;
                 setCoverError("");
                 setPreparingCover(true);
-                void playlistCoverFromFile(file)
+                void squareArtworkFromFile(file)
                   .then((image) => {
                     setCoverImage(image);
                     setCoverSeed(null);
@@ -2748,6 +3025,77 @@ function EditPlaylistSheet({
         </fieldset>
         <button className="primary-button full-button" type="submit" disabled={!name.trim() || !changed || busy || preparingCover}>
           {busy ? <LoaderCircle className="spin" /> : <Check />} Save changes
+        </button>
+      </form>
+    </Sheet>
+  );
+}
+
+function EditTrackSheet({
+  track,
+  busy,
+  onClose,
+  onSave,
+}: {
+  track: Track;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (details: { title: string; artist: string; customArtwork: string | null | "keep" }) => void;
+}) {
+  const [title, setTitle] = useState(track.title);
+  const [artist, setArtist] = useState(track.artist);
+  const [customArtwork, setCustomArtwork] = useState<string | null | "keep">("keep");
+  const [artworkError, setArtworkError] = useState("");
+  const [preparingArtwork, setPreparingArtwork] = useState(false);
+  const changed = title.trim() !== track.title || artist.trim() !== track.artist || customArtwork !== "keep";
+  const previewUrl = typeof customArtwork === "string" && customArtwork !== "keep"
+    ? customArtwork
+    : customArtwork === "keep"
+      ? track.artworkUrl
+      : undefined;
+  return (
+    <Sheet onClose={onClose} title={`Edit ${track.title}`}>
+      <div className="sheet-heading"><div><p className="eyebrow">Song details</p><h2>Edit song</h2></div><button className="icon-button" data-sheet-close aria-label="Close"><X /></button></div>
+      <form
+        className="playlist-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (title.trim() && artist.trim() && changed) onSave({ title: title.trim(), artist: artist.trim(), customArtwork });
+        }}
+      >
+        <label><span>Title</span><input autoFocus maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
+        <label><span>Artist</span><input maxLength={100} value={artist} onChange={(event) => setArtist(event.target.value)} /></label>
+        <fieldset className="cover-picker track-artwork-picker">
+          <legend>Artwork</legend>
+          <label className={`cover-upload ${customArtwork !== "keep" ? "selected" : ""}`}>
+            <span className="cover-upload-preview" style={previewUrl ? { backgroundImage: `url(${previewUrl})` } : undefined}>
+              {!previewUrl ? preparingArtwork ? <LoaderCircle className="spin" /> : <ImagePlus /> : customArtwork !== "keep" ? <Check /> : null}
+            </span>
+            <span><strong>Choose a square image</strong><small>JPEG, PNG, or WebP · under 8 MB</small></span>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              disabled={busy || preparingArtwork}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.currentTarget.value = "";
+                if (!file) return;
+                setArtworkError("");
+                setPreparingArtwork(true);
+                void squareArtworkFromFile(file)
+                  .then(setCustomArtwork)
+                  .catch((imageError) => setArtworkError(imageError instanceof Error ? imageError.message : "Could not prepare that image."))
+                  .finally(() => setPreparingArtwork(false));
+              }}
+            />
+          </label>
+          {artworkError ? <p className="cover-upload-error" role="alert">{artworkError}</p> : null}
+          <button className="secondary-button full-button" type="button" onClick={() => setCustomArtwork(null)} disabled={busy || preparingArtwork || (!track.hasCustomArtwork && customArtwork === null)}>
+            <Music2 /> {track.hasCustomArtwork ? "Use original Telegram artwork" : "Use tune artwork"}
+          </button>
+        </fieldset>
+        <button className="primary-button full-button" type="submit" disabled={!title.trim() || !artist.trim() || !changed || busy || preparingArtwork}>
+          {busy ? <LoaderCircle className="spin" /> : <Check />} Save song details
         </button>
       </form>
     </Sheet>
@@ -3060,11 +3408,15 @@ function SharedItemSheet({
   busy,
   onClose,
   onAddSong,
+  onOpenSong,
+  onAddPlaylist,
 }: {
   preview: SharedPreview;
   busy: boolean;
   onClose: () => void;
   onAddSong: () => void;
+  onOpenSong: () => void;
+  onAddPlaylist: () => void;
 }) {
   if (preview.type === "song") {
     return (
@@ -3076,9 +3428,9 @@ function SharedItemSheet({
           <h2>{preview.title}</h2>
           <p>{preview.artist} · {formatDuration(preview.duration)}</p>
         </div>
-        <button className="primary-button full-button" onClick={onAddSong} disabled={busy || preview.alreadyAdded}>
+        <button className="primary-button full-button" onClick={preview.alreadyAdded ? onOpenSong : onAddSong} disabled={busy}>
           {busy ? <LoaderCircle className="spin" /> : preview.alreadyAdded ? <Check /> : <Plus />}
-          {preview.alreadyAdded ? "Already in your library" : "Add to my library"}
+          {preview.alreadyAdded ? "Play from my library" : "Add to my library"}
         </button>
       </Sheet>
     );
@@ -3108,6 +3460,10 @@ function SharedItemSheet({
           </div>
         ))}
       </div>
+      <button className="primary-button full-button" onClick={onAddPlaylist} disabled={busy || preview.alreadyAdded}>
+        {busy ? <LoaderCircle className="spin" /> : preview.alreadyAdded ? <Check /> : <Plus />}
+        {preview.alreadyAdded ? "Already in your library" : "Add playlist to my library"}
+      </button>
     </Sheet>
   );
 }
@@ -3121,6 +3477,7 @@ function TrackSheet({
   onSendTelegram,
   onPlayNext,
   onToggleLiked,
+  onEdit,
   onShare,
   onAdd,
   onRemove,
@@ -3135,6 +3492,7 @@ function TrackSheet({
   onSendTelegram: () => void;
   onPlayNext: () => void;
   onToggleLiked: () => void;
+  onEdit: () => void;
   onShare: () => void;
   onAdd: (playlistId: string, trackId: string) => void;
   onRemove?: () => void;
@@ -3156,6 +3514,7 @@ function TrackSheet({
         <div><strong>{track.liked ? "Remove from Liked Songs" : "Add to Liked Songs"}</strong><small>{track.liked ? "Keep the song in your library" : "Save it with your favorites"}</small></div>
         <ChevronRight />
       </button>
+      <button className="sheet-action" onClick={onEdit} disabled={busy}><span><Pencil /></span><div><strong>Edit song details</strong><small>Change title, artist, or artwork</small></div><ChevronRight /></button>
       <button className="sheet-action share-action" onClick={onShare} disabled={busy}><span><Share2 /></span><div><strong>Share song</strong><small>Send a direct tune link</small></div><ChevronRight /></button>
       <button className="sheet-action" onClick={onSendTelegram} disabled={busy}><span><Send /></span><div><strong>Send to Telegram player</strong><small>Play it as an audio message in chat</small></div><ChevronRight /></button>
       {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from this playlist</strong><small>The song stays in My Library</small></div><ChevronRight /></button> : null}

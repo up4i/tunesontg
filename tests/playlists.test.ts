@@ -13,9 +13,12 @@ import {
   deleteTracks,
   deletePlaylist,
   getLibrary,
+  getPlaybackFile,
   getSharedPlaylistPreview,
   getSharedSongPreview,
+  importSharedPlaylist,
   importSharedSong,
+  recordPlaybackEvents,
   recordTrackPlayed,
   removeTracksFromPlaylist,
   saveTrack,
@@ -24,6 +27,7 @@ import {
   setTrackLiked,
   setPlaylistVisibility,
   updatePlaylistDetails,
+  updateTrackDetails,
   upsertUser,
 } from "../src/lib/db";
 import type { TelegramUser } from "../src/lib/types";
@@ -157,12 +161,57 @@ test("only public playlists can be opened from a share link", () => {
   assert.throws(() => createPlaylistShare(user, playlistId), /public/);
   setPlaylistVisibility(user, playlistId, "public");
   const shareId = createPlaylistShare(user, playlistId);
-  const preview = getSharedPlaylistPreview(shareId);
+  const preview = getSharedPlaylistPreview(user, shareId);
   assert.equal(preview?.name, "Shared playlist");
   assert.equal(preview?.trackCount, 1);
 
+  const recipient: TelegramUser = { id: 24680, first_name: "Playlist Recipient" };
+  const imported = importSharedPlaylist(recipient, shareId);
+  assert.equal(imported.created, true);
+  assert.equal(imported.addedTracks, 1);
+  assert.equal(importSharedPlaylist(recipient, shareId).created, false);
+  assert.equal(getSharedPlaylistPreview(recipient, shareId)?.alreadyAdded, true);
+  assert.equal(getLibrary(recipient).playlists.find((playlist) => playlist.id === imported.playlistId)?.trackCount, 1);
+
   setPlaylistVisibility(user, playlistId, "private");
-  assert.equal(getSharedPlaylistPreview(shareId), null);
+  assert.equal(getSharedPlaylistPreview(user, shareId), null);
+});
+
+test("track metadata and custom artwork can be edited", () => {
+  const track = saveTrack(user, {
+    fileId: "editable-file",
+    fileUniqueId: "editable-unique",
+    sourceChatId: user.id,
+    sourceMessageId: 889,
+    title: "Before",
+    artist: "Unknown artist",
+    duration: 190,
+  });
+  const artwork = "data:image/webp;base64,UklGRg==";
+  updateTrackDetails(user, track.id, { title: "After", artist: "Known Artist", customArtwork: artwork });
+  const updated = getLibrary(user).tracks.find((item) => item.id === track.id);
+  assert.equal(updated?.title, "After");
+  assert.equal(updated?.artist, "Known Artist");
+  assert.equal(updated?.hasCustomArtwork, true);
+  assert.equal(getPlaybackFile(String(user.id), track.id)?.customArtwork, artwork);
+});
+
+test("playback events produce a seven-day health summary", () => {
+  const track = getLibrary(user).tracks[0];
+  assert.ok(track);
+  recordPlaybackEvents(user, [
+    { trackId: track.id, sessionId: "session_1234", event: "play_request" },
+    { trackId: track.id, sessionId: "session_1234", event: "playback_started", startupMs: 420 },
+    { trackId: track.id, sessionId: "session_1234", event: "buffer_start", positionSeconds: 18 },
+    { trackId: track.id, sessionId: "session_1234", event: "stream_error", positionSeconds: 18 },
+    { trackId: track.id, sessionId: "session_1234", event: "retry_recovered", startupMs: 300 },
+  ]);
+  const summary = getLibrary(user).playbackSummary;
+  assert.equal(summary.starts, 1);
+  assert.equal(summary.averageStartupMs, 420);
+  assert.equal(summary.stalls, 1);
+  assert.equal(summary.errors, 1);
+  assert.equal(summary.recoveredRetries, 1);
 });
 
 test("a playlist can be created with selected songs and move them atomically", () => {

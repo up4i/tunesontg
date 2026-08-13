@@ -32,7 +32,7 @@ export async function GET(request: Request): Promise<Response> {
         ...track,
         streamUrl: `/api/tracks/${track.id}/stream?ticket=${ticket}`,
         artworkUrl: track.hasArtwork
-          ? `/api/tracks/${track.id}/artwork?ticket=${ticket}`
+          ? `/api/tracks/${track.id}/artwork?ticket=${ticket}&v=${track.artworkRevision}`
           : undefined,
       };
     };
