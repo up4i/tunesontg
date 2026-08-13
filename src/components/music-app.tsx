@@ -12,6 +12,7 @@ import {
   Globe2,
   Heart,
   House,
+  ImagePlus,
   Inbox,
   Library,
   ListMusic,
@@ -36,6 +37,7 @@ import {
   Sparkles,
   Sun,
   Trash2,
+  UserRound,
   Volume2,
   VolumeX,
   X,
@@ -43,10 +45,30 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LibraryPayload, Playlist, SharedPreview, Track } from "@/lib/types";
 
-type Tab = "home" | "library" | "playlists";
+type Tab = "home" | "library" | "playlists" | "profile";
 type ThemeMode = "telegram" | "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type Toast = { kind: "success" | "error"; message: string } | null;
+const primedStreamUrls = new Set<string>();
+
+function haptic(kind: "selection" | "success" | "error" = "selection") {
+  const webApp = window.Telegram?.WebApp;
+  if (!webApp?.isVersionAtLeast("6.1")) return;
+  const feedback = webApp.HapticFeedback;
+  if (kind === "selection") feedback?.selectionChanged();
+  else feedback?.notificationOccurred(kind);
+}
+
+function primeTrackStream(track: Track) {
+  if (!track.playable || !track.streamUrl || primedStreamUrls.has(track.streamUrl)) return;
+  primedStreamUrls.add(track.streamUrl);
+  void fetch(track.streamUrl, {
+    headers: { range: "bytes=0-0", "x-telegram-init-data": initData() },
+  }).then((response) => {
+    if (!response.ok) primedStreamUrls.delete(track.streamUrl!);
+    return response.body?.cancel();
+  }).catch(() => primedStreamUrls.delete(track.streamUrl!));
+}
 
 function initData(): string {
   return typeof window === "undefined" ? "" : window.Telegram?.WebApp.initData ?? "";
@@ -98,6 +120,49 @@ function randomized<T>(items: T[]): T[] {
   return result;
 }
 
+async function playlistCoverFromFile(file: File): Promise<string> {
+  if (!/^image\/(?:jpeg|png|webp)$/.test(file.type)) {
+    throw new Error("Choose a JPEG, PNG, or WebP image.");
+  }
+  if (file.size > 8_000_000) throw new Error("Choose an image smaller than 8 MB.");
+
+  const image = document.createElement("img");
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error("That image could not be opened."));
+      image.src = objectUrl;
+    });
+    const sizes = [640, 520, 420];
+    const qualities = [0.86, 0.78, 0.7];
+    const sourceSize = Math.min(image.naturalWidth, image.naturalHeight);
+    const sourceX = (image.naturalWidth - sourceSize) / 2;
+    const sourceY = (image.naturalHeight - sourceSize) / 2;
+
+    for (let index = 0; index < sizes.length; index += 1) {
+      const canvas = document.createElement("canvas");
+      canvas.width = sizes[index];
+      canvas.height = sizes[index];
+      const context = canvas.getContext("2d");
+      if (!context) break;
+      context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, sizes[index], sizes[index]);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", qualities[index]));
+      if (!blob) continue;
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(new Error("That image could not be prepared."));
+        reader.readAsDataURL(blob);
+      });
+      if (blob.size <= 750_000) return dataUrl;
+    }
+    throw new Error("That image is too detailed. Try a simpler or smaller image.");
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 function Cover({
   seed,
   size = "medium",
@@ -121,18 +186,36 @@ function Cover({
 }
 
 function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?: boolean }) {
+  if (playlist.kind === "liked") {
+    return (
+      <div
+        className={`playlist-cover playlist-cover-custom playlist-cover-liked ${large ? "playlist-cover-large" : ""}`}
+        aria-label="Liked Songs cover"
+      >
+        <Heart aria-hidden="true" fill="currentColor" />
+      </div>
+    );
+  }
+  if (playlist.coverImage) {
+    return (
+      <div
+        className={`playlist-cover playlist-cover-image ${large ? "playlist-cover-large" : ""}`}
+        aria-label={`${playlist.name} cover`}
+        style={{ backgroundImage: `url(${playlist.coverImage})` }}
+      />
+    );
+  }
   if (playlist.coverSeed !== null) {
     return (
       <div
         className={`playlist-cover playlist-cover-custom cover-${playlist.coverSeed % 8} ${large ? "playlist-cover-large" : ""}`}
         aria-label={`${playlist.name} cover`}
       >
-        {playlist.kind === "liked" ? <Heart aria-hidden="true" /> : <Music2 aria-hidden="true" />}
+        <Music2 aria-hidden="true" />
       </div>
     );
   }
   const tracks = playlist.tracks.slice(0, 4);
-  const EmptyIcon = playlist.kind === "liked" ? Heart : Music2;
   const tiles: Array<Track | null> = tracks.length
     ? tracks
     : Array.from({ length: 4 }, () => null);
@@ -144,7 +227,7 @@ function PlaylistCover({ playlist, large = false }: { playlist: Playlist; large?
           key={track?.id ?? index}
           style={track?.artworkUrl ? { backgroundImage: `url(${track.artworkUrl})` } : undefined}
         >
-          {index === 3 && !track ? <EmptyIcon aria-hidden="true" /> : null}
+          {index === 3 && !track ? <Music2 aria-hidden="true" /> : null}
         </div>
       ))}
     </div>
@@ -159,6 +242,8 @@ function TrackRow({
   selecting = false,
   selected = false,
   onSelect,
+  onSwipeQueue,
+  onSwipeLike,
 }: {
   track: Track;
   onPlay: () => void;
@@ -167,22 +252,79 @@ function TrackRow({
   selecting?: boolean;
   selected?: boolean;
   onSelect?: () => void;
+  onSwipeQueue?: () => void;
+  onSwipeLike?: () => void;
 }) {
+  const swipeRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);
+  const suppressSwipeClickRef = useRef(false);
+  const [swipeX, setSwipeX] = useState(0);
   return (
-    <div className={`track-row ${selected ? "track-row-selected" : ""}`}>
-      <button className="track-main" onClick={selecting ? onSelect : onPlay} aria-label={selecting ? `${selected ? "Deselect" : "Select"} ${track.title}` : `Play ${track.title}`}>
-        {selecting ? (
-          <span className={`selection-check ${selected ? "selected" : ""}`}>{selected ? <Check /> : null}</span>
-        ) : ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />}
-        <span className="track-copy">
-          <span className="track-title">{track.title}</span>
-          <span className="track-artist">{track.artist}</span>
-        </span>
-      </button>
-      <span className="track-duration">{formatDuration(track.duration)}</span>
-      <button className="icon-button track-more" onClick={selecting ? onSelect : onMore} aria-label={selecting ? `Toggle selection for ${track.title}` : `More options for ${track.title}`}>
-        {selecting ? selected ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" /> : <MoreHorizontal aria-hidden="true" />}
-      </button>
+    <div
+      className={`track-swipe-shell ${swipeX > 0 ? "swiping-queue" : swipeX < 0 ? "swiping-like" : ""}`}
+      onClickCapture={(event) => {
+        if (!suppressSwipeClickRef.current) return;
+        event.preventDefault();
+        event.stopPropagation();
+        suppressSwipeClickRef.current = false;
+      }}
+      onPointerDown={(event) => {
+        if (event.pointerType === "mouse" || selecting || (!onSwipeQueue && !onSwipeLike)) return;
+        swipeRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const swipe = swipeRef.current;
+        if (!swipe || swipe.pointerId !== event.pointerId) return;
+        const deltaX = event.clientX - swipe.startX;
+        const deltaY = event.clientY - swipe.startY;
+        if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > 8) {
+          swipeRef.current = null;
+          setSwipeX(0);
+          return;
+        }
+        if (Math.abs(deltaX) > 6) setSwipeX(Math.max(-96, Math.min(96, deltaX)));
+      }}
+      onPointerUp={(event) => {
+        const swipe = swipeRef.current;
+        if (!swipe || swipe.pointerId !== event.pointerId) return;
+        const deltaX = event.clientX - swipe.startX;
+        swipeRef.current = null;
+        setSwipeX(0);
+        suppressSwipeClickRef.current = Math.abs(deltaX) >= 24;
+        if (suppressSwipeClickRef.current) {
+          window.setTimeout(() => { suppressSwipeClickRef.current = false; }, 0);
+        }
+        if (deltaX >= 68) onSwipeQueue?.();
+        else if (deltaX <= -68) onSwipeLike?.();
+      }}
+      onPointerCancel={() => { swipeRef.current = null; setSwipeX(0); }}
+    >
+      <span className="track-swipe-action track-swipe-queue" aria-hidden="true"><ListPlus /><strong>Queue</strong></span>
+      <span className="track-swipe-action track-swipe-like" aria-hidden="true"><Heart /><strong>Like</strong></span>
+      <div
+        className={`track-row ${selected ? "track-row-selected" : ""}`}
+        style={{ transform: `translateX(${swipeX}px)` }}
+      >
+        <button
+          className="track-main"
+          onPointerEnter={() => { if (!selecting) primeTrackStream(track); }}
+          onPointerDown={() => { if (!selecting) primeTrackStream(track); }}
+          onClick={selecting ? onSelect : onPlay}
+          aria-label={selecting ? `${selected ? "Deselect" : "Select"} ${track.title}` : `Play ${track.title}`}
+        >
+          {selecting ? (
+            <span className={`selection-check ${selected ? "selected" : ""}`}>{selected ? <Check /> : null}</span>
+          ) : ordinal ? <span className="track-number">{ordinal}</span> : <Cover seed={track.artworkSeed} size="small" label={track.title} artworkUrl={track.artworkUrl} />}
+          <span className="track-copy">
+            <span className="track-title">{track.title}</span>
+            <span className="track-artist">{track.artist}</span>
+          </span>
+        </button>
+        <span className="track-duration">{formatDuration(track.duration)}</span>
+        <button className="icon-button track-more" onClick={selecting ? onSelect : onMore} aria-label={selecting ? `Toggle selection for ${track.title}` : `More options for ${track.title}`}>
+          {selecting ? selected ? <Check aria-hidden="true" /> : <Plus aria-hidden="true" /> : <MoreHorizontal aria-hidden="true" />}
+        </button>
+      </div>
     </div>
   );
 }
@@ -218,6 +360,7 @@ export function MusicApp() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const historyRecordedTrackRef = useRef<string | null>(null);
   const sharedParamHandledRef = useRef(false);
+  const knownLibraryTrackIdsRef = useRef<Set<string> | null>(null);
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
   const [tab, setTab] = useState<Tab>("home");
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
@@ -236,6 +379,7 @@ export function MusicApp() {
   const [error, setError] = useState<string | null>(null);
   const [queue, setQueue] = useState<Track[]>([]);
   const [queueIndex, setQueueIndex] = useState(0);
+  const [playbackStack, setPlaybackStack] = useState<Track[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
@@ -270,7 +414,9 @@ export function MusicApp() {
   const loadLibrary = useCallback(async () => {
     try {
       setError(null);
-      setLibrary(await api<LibraryPayload>("/api/library"));
+      const nextLibrary = await api<LibraryPayload>("/api/library");
+      knownLibraryTrackIdsRef.current = new Set(nextLibrary.tracks.map((track) => track.id));
+      setLibrary(nextLibrary);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load your library.");
     }
@@ -418,25 +564,58 @@ export function MusicApp() {
     );
   }, [library?.tracks, search]);
 
-  function haptic(kind: "selection" | "success" | "error" = "selection") {
-    const webApp = window.Telegram?.WebApp;
-    if (!webApp?.isVersionAtLeast("6.1")) return;
-    const feedback = webApp.HapticFeedback;
-    if (kind === "selection") feedback?.selectionChanged();
-    else feedback?.notificationOccurred(kind);
-  }
+  const refreshLibraryInBackground = useCallback(async () => {
+    try {
+      const nextLibrary = await api<LibraryPayload>("/api/library");
+      const previousIds = knownLibraryTrackIdsRef.current;
+      const additions = previousIds
+        ? nextLibrary.tracks.filter((track) => !previousIds.has(track.id))
+        : [];
+      knownLibraryTrackIdsRef.current = new Set(nextLibrary.tracks.map((track) => track.id));
+      setLibrary(nextLibrary);
+      if (additions.length) {
+        haptic("success");
+        setToast({
+          kind: "success",
+          message: additions.length === 1
+            ? `“${additions[0].title}” was added to My Library`
+            : `${additions.length} new songs were added to My Library`,
+        });
+      }
+    } catch {
+      // A background refresh should never replace the usable app with an error screen.
+    }
+  }, []);
+
+  useEffect(() => {
+    library?.tracks.slice(0, 4).forEach(primeTrackStream);
+  }, [library]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshLibraryInBackground();
+    };
+    const interval = window.setInterval(refreshWhenVisible, 4000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [refreshLibraryInBackground]);
 
   const activateTrack = useCallback((track: Track, autoplay = true) => {
     const audio = audioRef.current;
     if (!audio || !track.streamUrl) return;
     if (audio.getAttribute("src") !== track.streamUrl) {
       audio.src = track.streamUrl;
-      audio.load();
     }
     setCurrentTime(0);
     setMediaDuration(track.duration);
     historyRecordedTrackRef.current = null;
     if (autoplay) {
+      setIsPlaying(true);
       void audio.play().catch(() => {
         setIsPlaying(false);
         setToast({ kind: "error", message: "Tap play once more to start audio." });
@@ -458,8 +637,10 @@ export function MusicApp() {
   const playAt = useCallback((tracks: Track[], index: number) => {
     if (!tracks.length) return;
     const safeIndex = ((index % tracks.length) + tracks.length) % tracks.length;
-    setQueue(tracks);
-    setQueueIndex(safeIndex);
+    const nextQueue = [...tracks.slice(safeIndex), ...tracks.slice(0, safeIndex)];
+    setQueue(nextQueue);
+    setQueueIndex(0);
+    setPlaybackStack([]);
     activateTrack(tracks[safeIndex]);
   }, [activateTrack]);
 
@@ -488,6 +669,24 @@ export function MusicApp() {
 
   const advanceTrack = useCallback((direction: 1 | -1) => {
     if (!queue.length) return;
+    if (direction === 1) {
+      if (queue.length === 1) {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        return;
+      }
+      const oldTrack = queue[queueIndex];
+      const nextIndexBeforeRemoval = (queueIndex + 1) % queue.length;
+      const nextTrack = queue[nextIndexBeforeRemoval];
+      const nextQueue = queue.filter((_, index) => index !== queueIndex);
+      const nextIndex = nextQueue.findIndex((track) => track.id === nextTrack.id);
+      setPlaybackStack((current) => [...current.slice(-49), oldTrack]);
+      setQueue(nextQueue);
+      setQueueIndex(Math.max(0, nextIndex));
+      activateTrack(nextTrack);
+      haptic();
+      return;
+    }
     const nextIndex = (queueIndex + direction + queue.length) % queue.length;
     setQueueIndex(nextIndex);
     activateTrack(queue[nextIndex]);
@@ -501,8 +700,36 @@ export function MusicApp() {
       setCurrentTime(0);
       return;
     }
-    advanceTrack(-1);
-  }, [advanceTrack]);
+    const previous = playbackStack.at(-1);
+    if (!previous) {
+      if (audio) {
+        audio.currentTime = 0;
+        setCurrentTime(0);
+      }
+      return;
+    }
+    const active = queue[queueIndex];
+    const nextQueue = [previous, ...queue.filter((track) => track.id !== previous.id)];
+    if (active && !nextQueue.some((track) => track.id === active.id)) nextQueue.push(active);
+    setPlaybackStack((current) => current.slice(0, -1));
+    setQueue(nextQueue);
+    setQueueIndex(0);
+    activateTrack(previous);
+    haptic();
+  }, [activateTrack, playbackStack, queue, queueIndex]);
+
+  const selectQueueTrack = useCallback((index: number) => {
+    if (index === queueIndex || index < 0 || index >= queue.length) return;
+    const oldTrack = queue[queueIndex];
+    const selected = queue[index];
+    const nextQueue = queue.filter((_, itemIndex) => itemIndex !== queueIndex);
+    const nextIndex = nextQueue.findIndex((track) => track.id === selected.id);
+    setPlaybackStack((current) => [...current.slice(-49), oldTrack]);
+    setQueue(nextQueue);
+    setQueueIndex(Math.max(0, nextIndex));
+    activateTrack(selected);
+    haptic();
+  }, [activateTrack, queue, queueIndex]);
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
@@ -628,6 +855,7 @@ export function MusicApp() {
     if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
     setQueue([]);
     setQueueIndex(0);
+    setPlaybackStack([]);
     setCurrentTime(0);
     setMediaDuration(0);
     setIsPlaying(false);
@@ -950,6 +1178,15 @@ export function MusicApp() {
     }
   }
 
+  function swipeTrackToLiked(track: Track) {
+    if (track.liked) {
+      haptic();
+      setToast({ kind: "success", message: "Already in Liked Songs" });
+      return;
+    }
+    void toggleTrackLiked(track);
+  }
+
   function clearSelection() {
     setSelectionMode(false);
     setSelectedTrackIds([]);
@@ -975,7 +1212,7 @@ export function MusicApp() {
 
   async function updatePlaylistDetails(
     playlist: Playlist,
-    details: { name: string; description: string; coverSeed: number | null },
+    details: { name: string; description: string; coverSeed: number | null; coverImage: string | null },
   ) {
     setMutating(true);
     try {
@@ -1205,7 +1442,7 @@ export function MusicApp() {
     <div className={`app-frame ${currentTrack ? "has-player" : ""} ${selectionMode ? "selection-active" : ""}`}>
       <audio
         ref={audioRef}
-        preload="metadata"
+        preload="auto"
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onLoadedMetadata={(event) => {
@@ -1252,6 +1489,7 @@ export function MusicApp() {
               onReportBug={() => setBugReportOpen(true)}
               canAddHomeScreen={canAddHomeScreen}
               onAddHomeScreen={requestHomeScreen}
+              onProfile={() => switchTab("profile")}
               onSeeHistory={() => setHistoryOpen(true)}
               onPlay={(track) => startInAppQueue(
                 library.tracks,
@@ -1259,6 +1497,8 @@ export function MusicApp() {
                 library.tracks.findIndex((item) => item.id === track.id),
               )}
               onMore={setTrackMenu}
+              onSwipeQueue={playTrackNext}
+              onSwipeLike={swipeTrackToLiked}
               onPlaylist={(id) => { setSelectedPlaylistId(id); setTab("playlists"); }}
               onSeeLibrary={() => switchTab("library")}
               onShuffle={() => startInAppQueue(library.tracks, true)}
@@ -1278,6 +1518,8 @@ export function MusicApp() {
                 filteredTracks.findIndex((item) => item.id === track.id),
               )}
               onMore={setTrackMenu}
+              onSwipeQueue={playTrackNext}
+              onSwipeLike={swipeTrackToLiked}
               onShuffle={() => startInAppQueue(library.tracks, true)}
               sending={sending}
               selecting={selectionMode}
@@ -1306,6 +1548,8 @@ export function MusicApp() {
                 selectedPlaylist.tracks.findIndex((item) => item.id === track.id),
               )}
               onMore={setTrackMenu}
+              onSwipeQueue={playTrackNext}
+              onSwipeLike={swipeTrackToLiked}
               onAddMusic={() => setAddMusicPlaylistId(selectedPlaylist.id)}
               onEdit={() => setEditPlaylistTarget(selectedPlaylist)}
               onDelete={() => setDeletePlaylistTarget(selectedPlaylist)}
@@ -1319,6 +1563,7 @@ export function MusicApp() {
               onSelect={toggleTrackSelection}
             />
           ) : null}
+          {tab === "profile" ? <ProfileScreen library={library} /> : null}
 
           {selectionMode ? (
             <SelectionToolbar
@@ -1420,8 +1665,7 @@ export function MusicApp() {
           queueIndex={queueIndex}
           onClose={() => setQueueOpen(false)}
           onPlay={(index) => {
-            setQueueIndex(index);
-            activateTrack(queue[index]);
+            selectQueueTrack(index);
           }}
           onMove={moveQueueTrack}
           onRemove={removeQueueTrack}
@@ -1444,6 +1688,8 @@ export function MusicApp() {
             setHistoryOpen(false);
             setTrackMenu(track);
           }}
+          onSwipeQueue={playTrackNext}
+          onSwipeLike={swipeTrackToLiked}
         />
       ) : null}
       {sharedPreview ? (
@@ -1458,7 +1704,6 @@ export function MusicApp() {
         <TrackSheet
           track={trackMenu}
           playlists={library.playlists}
-          currentPlaylist={selectedPlaylist}
           busy={mutating || sending}
           onClose={() => setTrackMenu(null)}
           onPlayNow={() => {
@@ -1526,6 +1771,7 @@ function Header({
   onReportBug,
   canAddHomeScreen,
   onAddHomeScreen,
+  onProfile,
   subtitle = "Your music, right here.",
 }: {
   name: string;
@@ -1536,6 +1782,7 @@ function Header({
   onReportBug: () => void;
   canAddHomeScreen: boolean;
   onAddHomeScreen: () => void;
+  onProfile: () => void;
   subtitle?: string;
 }) {
   const ThemeIcon = themeMode === "telegram"
@@ -1562,9 +1809,9 @@ function Header({
         <button className="theme-toggle" onClick={onThemeChange} aria-label={`Theme: ${themeLabel}. Change theme`} title={`Theme: ${themeLabel}`}>
           <ThemeIcon />
         </button>
-        <div className="avatar" aria-label={`${name}'s profile`}>
+        <button className="avatar" onClick={onProfile} aria-label={`Open ${name}'s profile`}>
           {photoUrl ? <span className="avatar-image" style={{ backgroundImage: `url(${photoUrl})` }} /> : name.charAt(0).toUpperCase()}
-        </div>
+        </button>
       </div>
     </header>
   );
@@ -1578,9 +1825,12 @@ function HomeScreen({
   onReportBug,
   canAddHomeScreen,
   onAddHomeScreen,
+  onProfile,
   onSeeHistory,
   onPlay,
   onMore,
+  onSwipeQueue,
+  onSwipeLike,
   onPlaylist,
   onSeeLibrary,
   onShuffle,
@@ -1593,9 +1843,12 @@ function HomeScreen({
   onReportBug: () => void;
   canAddHomeScreen: boolean;
   onAddHomeScreen: () => void;
+  onProfile: () => void;
   onSeeHistory: () => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
+  onSwipeQueue: (track: Track) => void;
+  onSwipeLike: (track: Track) => void;
   onPlaylist: (id: string) => void;
   onSeeLibrary: () => void;
   onShuffle: () => void;
@@ -1616,6 +1869,7 @@ function HomeScreen({
         onReportBug={onReportBug}
         canAddHomeScreen={canAddHomeScreen}
         onAddHomeScreen={onAddHomeScreen}
+        onProfile={onProfile}
       />
 
       <section className="welcome-block">
@@ -1653,7 +1907,7 @@ function HomeScreen({
           <button onClick={onSeeLibrary}>See all <ChevronRight /></button>
         </div>
         {recent.length ? recent.map((track) => (
-          <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} />
+          <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} onSwipeQueue={() => onSwipeQueue(track)} onSwipeLike={() => onSwipeLike(track)} />
         )) : <EmptyState title="Your music inbox is empty" copy="Send or forward an audio track to the bot and it will appear here." />}
       </section>
 
@@ -1664,7 +1918,7 @@ function HomeScreen({
             <button onClick={onSeeHistory}>See all <ChevronRight /></button>
           </div>
           {library.recentlyPlayed.slice(0, 4).map((track) => (
-            <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} />
+            <TrackRow key={track.id} track={track} onPlay={() => onPlay(track)} onMore={() => onMore(track)} onSwipeQueue={() => onSwipeQueue(track)} onSwipeLike={() => onSwipeLike(track)} />
           ))}
         </section>
       ) : null}
@@ -1685,6 +1939,8 @@ function LibraryScreen({
   setSearch,
   onPlay,
   onMore,
+  onSwipeQueue,
+  onSwipeLike,
   onShuffle,
   sending,
   selecting,
@@ -1700,6 +1956,8 @@ function LibraryScreen({
   setSearch: (value: string) => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
+  onSwipeQueue: (track: Track) => void;
+  onSwipeLike: (track: Track) => void;
   onShuffle: () => void;
   sending: boolean;
   selecting: boolean;
@@ -1739,6 +1997,8 @@ function LibraryScreen({
             track={track}
             onPlay={() => onPlay(track)}
             onMore={() => onMore(track)}
+            onSwipeQueue={() => onSwipeQueue(track)}
+            onSwipeLike={() => onSwipeLike(track)}
             selecting={selecting}
             selected={selectedIds.includes(track.id)}
             onSelect={() => onSelect(track.id)}
@@ -1782,6 +2042,32 @@ function PlaylistsScreen({ playlists, onOpen, onCreate }: { playlists: Playlist[
   );
 }
 
+function ProfileScreen({ library }: { library: LibraryPayload }) {
+  const displayName = library.user.firstName;
+  return (
+    <main className="screen profile-screen">
+      <div className="page-heading">
+        <div><p className="eyebrow">Your space</p><h1>Profile</h1></div>
+      </div>
+      <section className="profile-card">
+        <div className="profile-avatar" aria-label={`${displayName}'s profile picture`}>
+          {library.user.photoUrl
+            ? <span style={{ backgroundImage: `url(${library.user.photoUrl})` }} />
+            : displayName.charAt(0).toUpperCase()}
+        </div>
+        <h2>{displayName}</h2>
+        <p>{library.user.username ? `@${library.user.username}` : "Telegram listener"}</p>
+      </section>
+      <section className="profile-coming-soon">
+        <span><UserRound /></span>
+        <p className="eyebrow">In development</p>
+        <h2>Coming soon…</h2>
+        <p>Customize your profile, connect with friends, and share what you are listening to.</p>
+      </section>
+    </main>
+  );
+}
+
 function PlaylistDetail({
   playlist,
   onBack,
@@ -1789,6 +2075,8 @@ function PlaylistDetail({
   onShuffle,
   onTrackPlay,
   onMore,
+  onSwipeQueue,
+  onSwipeLike,
   onAddMusic,
   onEdit,
   onDelete,
@@ -1807,6 +2095,8 @@ function PlaylistDetail({
   onShuffle: () => void;
   onTrackPlay: (track: Track) => void;
   onMore: (track: Track) => void;
+  onSwipeQueue: (track: Track) => void;
+  onSwipeLike: (track: Track) => void;
   onAddMusic: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -1862,6 +2152,8 @@ function PlaylistDetail({
             ordinal={index + 1}
             onPlay={() => onTrackPlay(track)}
             onMore={() => onMore(track)}
+            onSwipeQueue={() => onSwipeQueue(track)}
+            onSwipeLike={() => onSwipeLike(track)}
             selecting={selecting}
             selected={selectedIds.includes(track.id)}
             onSelect={() => onSelect(track.id)}
@@ -1947,6 +2239,8 @@ function NowPlaying({
   onQueue: () => void;
 }) {
   const [volumeOpen, setVolumeOpen] = useState(false);
+  const playerDragRef = useRef<{ pointerId: number; startY: number; startTime: number } | null>(null);
+  const [playerDragY, setPlayerDragY] = useState(0);
   const safeDuration = Math.max(duration || 0, 0);
   const displayedVolume = muted ? 0 : volume;
   const VolumeIcon = muted || volume === 0 ? VolumeX : Volume2;
@@ -1957,9 +2251,32 @@ function NowPlaying({
       aria-modal={open ? "true" : undefined}
       aria-hidden={!open}
       aria-label="Now playing"
+      style={{ "--player-drag": `${playerDragY}px` } as React.CSSProperties}
     >
       <div className="now-playing-wash" />
-      <header className="player-header">
+      <header
+        className="player-header"
+        onPointerDown={(event) => {
+          if (event.target instanceof Element && event.target.closest("button")) return;
+          playerDragRef.current = { pointerId: event.pointerId, startY: event.clientY, startTime: performance.now() };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          const drag = playerDragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          setPlayerDragY(Math.max(0, event.clientY - drag.startY));
+        }}
+        onPointerUp={(event) => {
+          const drag = playerDragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          const distance = Math.max(0, event.clientY - drag.startY);
+          const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+          playerDragRef.current = null;
+          if (distance >= 72 || (distance >= 28 && velocity > 0.55)) onClose();
+          setPlayerDragY(0);
+        }}
+        onPointerCancel={() => { playerDragRef.current = null; setPlayerDragY(0); }}
+      >
         <button onClick={onClose} aria-label="Minimize player"><ChevronDown /></button>
         <div><span>Now playing</span><strong>From your Telegram library · {queuePosition}/{queueLength}</strong></div>
         <button onClick={onMore} aria-label={`More options for ${track.title}`}><MoreHorizontal /></button>
@@ -1994,7 +2311,10 @@ function NowPlaying({
             {isPlaying ? <Pause fill="currentColor" /> : <Play fill="currentColor" />}
           </button>
           <button onClick={onNext} aria-label="Next track"><SkipForward fill="currentColor" /></button>
-          <button className={repeatOne ? "active" : ""} onClick={onRepeat} aria-label="Repeat track"><Repeat2 /></button>
+          <button className={`repeat-control ${repeatOne ? "active" : ""}`} onClick={onRepeat} aria-label={repeatOne ? "Loop this song is on" : "Loop this song is off"} aria-pressed={repeatOne}>
+            <Repeat2 />
+            {repeatOne ? <span aria-hidden="true">1</span> : null}
+          </button>
         </div>
         <button className="queue-open-button" onClick={onQueue}>
           <ListMusic />
@@ -2002,40 +2322,38 @@ function NowPlaying({
           <strong>{queuePosition} of {queueLength}</strong>
           <ChevronRight />
         </button>
-        <div className="player-utility-row">
+        <div className={`player-utility-row ${volumeOpen ? "volume-control-open" : ""}`}>
           <div className="streaming-badge"><span /><strong>Streaming securely</strong> from Telegram</div>
-          <div className={`volume-control ${volumeOpen ? "volume-control-open" : ""}`}>
+          <button
+            className="volume-disclosure"
+            onClick={() => setVolumeOpen((value) => !value)}
+            aria-expanded={volumeOpen}
+            aria-controls="player-volume-panel"
+            aria-label="Volume controls"
+          >
+            <VolumeIcon />
+          </button>
+          <div className="volume-panel" id="player-volume-panel" aria-hidden={!volumeOpen}>
             <button
-              className="volume-disclosure"
-              onClick={() => setVolumeOpen((value) => !value)}
-              aria-expanded={volumeOpen}
-              aria-controls="player-volume-panel"
-              aria-label="Volume controls"
+              onClick={onMuteToggle}
+              disabled={!volumeOpen}
+              aria-label={muted ? "Unmute" : "Mute"}
+              title={muted ? "Unmute" : "Mute"}
             >
               <VolumeIcon />
             </button>
-            <div className="volume-panel" id="player-volume-panel" aria-hidden={!volumeOpen}>
-              <button
-                onClick={onMuteToggle}
-                disabled={!volumeOpen}
-                aria-label={muted ? "Unmute" : "Mute"}
-                title={muted ? "Unmute" : "Mute"}
-              >
-                <VolumeIcon />
-              </button>
-              <input
-                aria-label="Volume"
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={displayedVolume}
-                disabled={!volumeOpen}
-                onChange={(event) => onVolumeChange(Number(event.target.value))}
-                style={{ "--volume": `${displayedVolume * 100}%` } as React.CSSProperties}
-              />
-              <output>{Math.round(displayedVolume * 100)}%</output>
-            </div>
+            <input
+              aria-label="Volume"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={displayedVolume}
+              disabled={!volumeOpen}
+              onChange={(event) => onVolumeChange(Number(event.target.value))}
+              style={{ "--volume": `${displayedVolume * 100}%` } as React.CSSProperties}
+            />
+            <output>{Math.round(displayedVolume * 100)}%</output>
           </div>
         </div>
       </div>
@@ -2048,6 +2366,7 @@ function BottomNav({ tab, onSelect }: { tab: Tab; onSelect: (tab: Tab) => void }
     { id: "home", label: "Home", Icon: House },
     { id: "library", label: "Library", Icon: Library },
     { id: "playlists", label: "Playlists", Icon: ListMusic },
+    { id: "profile", label: "Profile", Icon: UserRound },
   ];
   return (
     <nav className="bottom-nav" aria-label="Main navigation">
@@ -2097,7 +2416,7 @@ function SelectionToolbar({
         <button onClick={onLike} disabled={busy || !selectedCount}><Heart fill={allLiked ? "currentColor" : "none"} /><span>{allLiked ? "Unlike" : "Like"}</span></button>
         <button onClick={onShare} disabled={busy || !selectedCount || selectedCount > 10} title={selectedCount > 10 ? "Share up to 10 songs at once" : "Share songs"}><Share2 /><span>Share</span></button>
         <button onClick={onSend} disabled={busy || !selectedCount}><Send /><span>Telegram</span></button>
-        {onRemove ? <button onClick={onRemove} disabled={busy || !selectedCount}><X /><span>Remove</span></button> : null}
+        {onRemove ? <button onClick={onRemove} disabled={busy || !selectedCount}><X /><span>Remove here</span></button> : null}
         <button className="destructive" onClick={onDelete} disabled={busy || !selectedCount}><Trash2 /><span>Delete</span></button>
       </div>
     </aside>
@@ -2106,28 +2425,74 @@ function SelectionToolbar({
 
 function Sheet({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   const onCloseRef = useRef(onClose);
+  const closeTimerRef = useRef(0);
+  const closingRef = useRef(false);
+  const dragRef = useRef<{ pointerId: number; startY: number; startTime: number } | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [dragY, setDragY] = useState(0);
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
+  const requestClose = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    setDragY(0);
+    closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 220);
+  }, []);
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onCloseRef.current();
+      requestClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
+      window.clearTimeout(closeTimerRef.current);
     };
-  }, []);
+  }, [requestClose]);
   return (
-    <div className="sheet-layer" role="dialog" aria-modal="true" aria-label={title}>
-      <button className="sheet-backdrop" onClick={onClose} aria-label="Close" />
-      <div className="sheet">
-        <div className="sheet-handle" />
+    <div className={`sheet-layer ${closing ? "sheet-layer-closing" : ""}`} role="dialog" aria-modal="true" aria-label={title}>
+      <button className="sheet-backdrop" onClick={requestClose} aria-label="Close" />
+      <div
+        className={`sheet ${dragY ? "sheet-dragging" : ""}`}
+        style={{ "--sheet-drag": `${dragY}px` } as React.CSSProperties}
+        onClickCapture={(event) => {
+          const target = event.target instanceof Element ? event.target.closest("[data-sheet-close]") : null;
+          if (!target) return;
+          event.preventDefault();
+          event.stopPropagation();
+          requestClose();
+        }}
+      >
+        <div
+          className="sheet-handle"
+          aria-label="Swipe down to close"
+          onPointerDown={(event) => {
+            if (closing) return;
+            dragRef.current = { pointerId: event.pointerId, startY: event.clientY, startTime: performance.now() };
+            event.currentTarget.setPointerCapture(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            setDragY(Math.max(0, event.clientY - drag.startY));
+          }}
+          onPointerUp={(event) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            const distance = Math.max(0, event.clientY - drag.startY);
+            const velocity = distance / Math.max(1, performance.now() - drag.startTime);
+            dragRef.current = null;
+            if (distance >= 72 || (distance >= 28 && velocity > 0.55)) requestClose();
+            else setDragY(0);
+          }}
+          onPointerCancel={() => { dragRef.current = null; setDragY(0); }}
+        />
         {children}
       </div>
     </div>
@@ -2139,7 +2504,7 @@ function CreatePlaylistSheet({ busy, onClose, onCreate }: { busy: boolean; onClo
   const [description, setDescription] = useState("");
   return (
     <Sheet onClose={onClose} title="Create playlist">
-      <div className="sheet-heading"><div><p className="eyebrow">A new collection</p><h2>Create playlist</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <div className="sheet-heading"><div><p className="eyebrow">A new collection</p><h2>Create playlist</h2></div><button className="icon-button" data-sheet-close aria-label="Close"><X /></button></div>
       <form className="playlist-form" onSubmit={(event) => { event.preventDefault(); if (name.trim()) onCreate(name.trim(), description.trim()); }}>
         <label><span>Name</span><input autoFocus maxLength={60} value={name} onChange={(event) => setName(event.target.value)} placeholder="late night drive" /></label>
         <label><span>Description <em>optional</em></span><textarea maxLength={160} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What does this playlist feel like?" rows={3} /></label>
@@ -2160,38 +2525,71 @@ function EditPlaylistSheet({
   playlist: Playlist;
   busy: boolean;
   onClose: () => void;
-  onSave: (details: { name: string; description: string; coverSeed: number | null }) => void;
+  onSave: (details: { name: string; description: string; coverSeed: number | null; coverImage: string | null }) => void;
 }) {
   const [name, setName] = useState(playlist.name);
   const [description, setDescription] = useState(playlist.description);
   const [coverSeed, setCoverSeed] = useState<number | null>(playlist.coverSeed);
+  const [coverImage, setCoverImage] = useState<string | null>(playlist.coverImage);
+  const [coverError, setCoverError] = useState("");
+  const [preparingCover, setPreparingCover] = useState(false);
   const changed = name.trim() !== playlist.name
     || description.trim() !== playlist.description
-    || coverSeed !== playlist.coverSeed;
+    || coverSeed !== playlist.coverSeed
+    || coverImage !== playlist.coverImage;
   return (
     <Sheet onClose={onClose} title={`Edit ${playlist.name}`}>
-      <div className="sheet-heading"><div><p className="eyebrow">Playlist details</p><h2>Edit playlist</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <div className="sheet-heading"><div><p className="eyebrow">Playlist details</p><h2>Edit playlist</h2></div><button className="icon-button" data-sheet-close aria-label="Close"><X /></button></div>
       <form
         className="playlist-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (name.trim() && changed) onSave({ name: name.trim(), description: description.trim(), coverSeed });
+          if (name.trim() && changed) onSave({ name: name.trim(), description: description.trim(), coverSeed, coverImage });
         }}
       >
         <label><span>Name</span><input autoFocus maxLength={60} value={name} onChange={(event) => setName(event.target.value)} /></label>
         <label><span>Description <em>optional</em></span><textarea maxLength={160} value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></label>
         <fieldset className="cover-picker">
           <legend>Cover</legend>
+          <label className={`cover-upload ${coverImage ? "selected" : ""}`}>
+            <span
+              className="cover-upload-preview"
+              style={coverImage ? { backgroundImage: `url(${coverImage})` } : undefined}
+            >
+              {!coverImage ? preparingCover ? <LoaderCircle className="spin" /> : <ImagePlus /> : <Check />}
+            </span>
+            <span><strong>Choose your own image</strong><small>Square crop · JPEG, PNG, or WebP</small></span>
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              disabled={busy || preparingCover}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.currentTarget.value = "";
+                if (!file) return;
+                setCoverError("");
+                setPreparingCover(true);
+                void playlistCoverFromFile(file)
+                  .then((image) => {
+                    setCoverImage(image);
+                    setCoverSeed(null);
+                  })
+                  .catch((imageError) => setCoverError(imageError instanceof Error ? imageError.message : "Could not prepare that image."))
+                  .finally(() => setPreparingCover(false));
+              }}
+            />
+          </label>
+          {coverError ? <p className="cover-upload-error" role="alert">{coverError}</p> : null}
           <div>
-            <button type="button" className={`cover-choice cover-choice-auto ${coverSeed === null ? "selected" : ""}`} onClick={() => setCoverSeed(null)} aria-pressed={coverSeed === null}><Music2 /><span>Auto</span></button>
+            <button type="button" className={`cover-choice cover-choice-auto ${coverSeed === null && !coverImage ? "selected" : ""}`} onClick={() => { setCoverSeed(null); setCoverImage(null); }} aria-pressed={coverSeed === null && !coverImage}><Music2 /><span>Auto</span></button>
             {Array.from({ length: 8 }, (_, seed) => (
-              <button type="button" className={`cover-choice cover-${seed} ${coverSeed === seed ? "selected" : ""}`} key={seed} onClick={() => setCoverSeed(seed)} aria-label={`Cover color ${seed + 1}`} aria-pressed={coverSeed === seed}>
+              <button type="button" className={`cover-choice cover-${seed} ${coverSeed === seed && !coverImage ? "selected" : ""}`} key={seed} onClick={() => { setCoverSeed(seed); setCoverImage(null); }} aria-label={`Cover color ${seed + 1}`} aria-pressed={coverSeed === seed && !coverImage}>
                 {coverSeed === seed ? <Check /> : <Music2 />}
               </button>
             ))}
           </div>
         </fieldset>
-        <button className="primary-button full-button" type="submit" disabled={!name.trim() || !changed || busy}>
+        <button className="primary-button full-button" type="submit" disabled={!name.trim() || !changed || busy || preparingCover}>
           {busy ? <LoaderCircle className="spin" /> : <Check />} Save changes
         </button>
       </form>
@@ -2221,7 +2619,7 @@ function BulkPlaylistSheet({
   const targets = playlists.filter((playlist) => playlist.id !== currentPlaylist?.id);
   return (
     <Sheet onClose={onClose} title="Organize selected songs">
-      <div className="sheet-heading"><div><p className="eyebrow">{tracks.length} selected</p><h2>Add to playlist</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <div className="sheet-heading"><div><p className="eyebrow">{tracks.length} selected</p><h2>Add to playlist</h2></div><button className="icon-button" data-sheet-close aria-label="Close"><X /></button></div>
       <div className="bulk-playlist-list">
         {targets.map((playlist) => (
           <button type="button" className={targetId === playlist.id ? "selected" : ""} key={playlist.id} onClick={() => setTargetId(playlist.id)} disabled={busy}>
@@ -2267,7 +2665,7 @@ function DeleteTracksSheet({
         <h2>Remove {label}?</h2>
         <p>This permanently removes {tracks.length === 1 ? "the song" : "these songs"} from every playlist, Liked Songs, and listening history.</p>
         <div>
-          <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="secondary-button" data-sheet-close disabled={busy}>Cancel</button>
           <button className="danger-button" onClick={onDelete} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <Trash2 />} Remove</button>
         </div>
       </div>
@@ -2287,7 +2685,7 @@ function BugReportSheet({
   const [description, setDescription] = useState("");
   return (
     <Sheet onClose={onClose} title="Report a bug">
-      <div className="sheet-heading"><div><p className="eyebrow">Help improve tune</p><h2>Report a bug</h2></div><button className="icon-button" onClick={onClose}><X /></button></div>
+      <div className="sheet-heading"><div><p className="eyebrow">Help improve tune</p><h2>Report a bug</h2></div><button className="icon-button" data-sheet-close aria-label="Close"><X /></button></div>
       <form className="playlist-form" onSubmit={(event) => { event.preventDefault(); if (description.trim().length >= 3) onSubmit(description.trim()); }}>
         <label><span>What happened?</span><textarea autoFocus rows={6} minLength={3} maxLength={2000} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Tell us what you expected and what happened instead…" /></label>
         <p className="bug-context-note">Telegram version, platform, theme, and screen size are attached automatically. No messages or music files are included.</p>
@@ -2338,7 +2736,7 @@ function AddMusicSheet({
     <Sheet onClose={onClose} title={`Add music to ${playlist.name}`}>
       <div className="sheet-heading">
         <div><p className="eyebrow">{playlist.name}</p><h2>Add music</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close"><X /></button>
+        <button className="icon-button" data-sheet-close aria-label="Close"><X /></button>
       </div>
       <label className="search-box music-picker-search">
         <Search aria-hidden="true" />
@@ -2404,7 +2802,7 @@ function DeletePlaylistSheet({
         <h2>Delete “{playlist.name}”?</h2>
         <p>The playlist will be removed, but its {playlist.trackCount === 1 ? "song stays" : "songs stay"} in your Library.</p>
         <div>
-          <button className="secondary-button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="secondary-button" data-sheet-close disabled={busy}>Cancel</button>
           <button className="danger-button" onClick={onDelete} disabled={busy}>
             {busy ? <LoaderCircle className="spin" /> : <Trash2 />} Delete playlist
           </button>
@@ -2435,7 +2833,7 @@ function QueueSheet({
     <Sheet onClose={onClose} title="Playback queue">
       <div className="sheet-heading queue-heading">
         <div><p className="eyebrow">{queue.length} {queue.length === 1 ? "song" : "songs"}</p><h2>Queue</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close queue"><X /></button>
+        <button className="icon-button" data-sheet-close aria-label="Close queue"><X /></button>
       </div>
       <div className="queue-sheet-list">
         {queue.map((track, index) => {
@@ -2468,17 +2866,21 @@ function HistorySheet({
   onClose,
   onPlay,
   onMore,
+  onSwipeQueue,
+  onSwipeLike,
 }: {
   tracks: Track[];
   onClose: () => void;
   onPlay: (track: Track) => void;
   onMore: (track: Track) => void;
+  onSwipeQueue: (track: Track) => void;
+  onSwipeLike: (track: Track) => void;
 }) {
   return (
     <Sheet onClose={onClose} title="Listening history">
       <div className="sheet-heading history-heading">
         <div><p className="eyebrow">Listen again</p><h2>Recently played</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close history"><X /></button>
+        <button className="icon-button" data-sheet-close aria-label="Close history"><X /></button>
       </div>
       <div className="history-sheet-list">
         {tracks.map((track) => (
@@ -2487,6 +2889,8 @@ function HistorySheet({
             track={track}
             onPlay={() => onPlay(track)}
             onMore={() => onMore(track)}
+            onSwipeQueue={() => onSwipeQueue(track)}
+            onSwipeLike={() => onSwipeLike(track)}
           />
         ))}
       </div>
@@ -2509,7 +2913,7 @@ function SharedItemSheet({
     return (
       <Sheet onClose={onClose} title={`Shared song: ${preview.title}`}>
         <div className="shared-item-heading">
-          <button className="icon-button" onClick={onClose} aria-label="Close shared song"><X /></button>
+          <button className="icon-button" data-sheet-close aria-label="Close shared song"><X /></button>
           <Cover seed={preview.artworkSeed} size="large" label={preview.title} />
           <p className="eyebrow">{preview.ownerName} sent you a song</p>
           <h2>{preview.title}</h2>
@@ -2527,7 +2931,14 @@ function SharedItemSheet({
     <Sheet onClose={onClose} title={`Shared playlist: ${preview.name}`}>
       <div className="sheet-heading shared-playlist-heading">
         <div><p className="eyebrow">Public playlist by {preview.ownerName}</p><h2>{preview.name}</h2></div>
-        <button className="icon-button" onClick={onClose} aria-label="Close shared playlist"><X /></button>
+        <button className="icon-button" data-sheet-close aria-label="Close shared playlist"><X /></button>
+      </div>
+      <div
+        className={`shared-playlist-cover ${preview.coverImage ? "playlist-cover-image" : `cover-${preview.coverSeed ?? 4}`}`}
+        style={preview.coverImage ? { backgroundImage: `url(${preview.coverImage})` } : undefined}
+        aria-label={`${preview.name} cover`}
+      >
+        {!preview.coverImage ? <Music2 /> : null}
       </div>
       {preview.description ? <p className="shared-playlist-description">{preview.description}</p> : null}
       <p className="shared-playlist-stats">{formatSongCount(preview.trackCount)} · {formatCollectionDuration(preview.duration)}</p>
@@ -2547,7 +2958,6 @@ function SharedItemSheet({
 function TrackSheet({
   track,
   playlists,
-  currentPlaylist,
   busy,
   onClose,
   onPlayNow,
@@ -2562,7 +2972,6 @@ function TrackSheet({
 }: {
   track: Track;
   playlists: Playlist[];
-  currentPlaylist: Playlist | null;
   busy: boolean;
   onClose: () => void;
   onPlayNow: () => void;
@@ -2581,7 +2990,7 @@ function TrackSheet({
       <div className="sheet-track">
         <Cover seed={track.artworkSeed} size="medium" label={track.title} artworkUrl={track.artworkUrl} />
         <div><h2>{track.title}</h2><p>{track.artist}</p></div>
-        <button className="icon-button" onClick={onClose}><X /></button>
+        <button className="icon-button" data-sheet-close aria-label="Close"><X /></button>
       </div>
       <button className="sheet-action play-now-action" onClick={onPlayNow} disabled={busy || !track.playable}><span><Play fill="currentColor" /></span><div><strong>Play now</strong><small>Listen here with full controls</small></div><ChevronRight /></button>
       <button className="sheet-action queue-next-action" onClick={onPlayNext} disabled={busy || !track.playable}><span><ListPlus /></span><div><strong>Play next</strong><small>Put it after the current song</small></div><ChevronRight /></button>
@@ -2592,7 +3001,12 @@ function TrackSheet({
       </button>
       <button className="sheet-action share-action" onClick={onShare} disabled={busy}><span><Share2 /></span><div><strong>Share song</strong><small>Send a direct tune link</small></div><ChevronRight /></button>
       <button className="sheet-action" onClick={onSendTelegram} disabled={busy}><span><Send /></span><div><strong>Send to Telegram player</strong><small>Play it as an audio message in chat</small></div><ChevronRight /></button>
-      {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from {currentPlaylist?.name}</strong><small>The song stays in your library</small></div><ChevronRight /></button> : null}
+      {onRemove ? <button className="sheet-action danger-action" onClick={onRemove} disabled={busy}><span><X /></span><div><strong>Remove from this playlist</strong><small>The song stays in My Library</small></div><ChevronRight /></button> : null}
+      <button className="sheet-action danger-action library-remove-action" onClick={onRemoveLibrary} disabled={busy}>
+        <span><Trash2 /></span>
+        <div><strong>Remove from My Library</strong><small>Deletes it from every playlist and listening history</small></div>
+        <ChevronRight />
+      </button>
       <div className="sheet-divider" />
       <div className="sheet-subheading"><span>Add to playlist</span><button onClick={onNewPlaylist}><Plus /> New</button></div>
       <div className="playlist-options">
@@ -2607,12 +3021,6 @@ function TrackSheet({
           );
         }) : <p className="no-playlists">No playlists yet. Create one to start collecting tracks.</p>}
       </div>
-      <div className="sheet-divider" />
-      <button className="sheet-action danger-action" onClick={onRemoveLibrary} disabled={busy}>
-        <span><Trash2 /></span>
-        <div><strong>Remove from My Library</strong><small>Deletes it from every playlist and listening history</small></div>
-        <ChevronRight />
-      </button>
     </Sheet>
   );
 }

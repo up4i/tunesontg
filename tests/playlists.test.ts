@@ -241,12 +241,27 @@ test("playlist details and generated cover can be edited", () => {
     name: "After",
     description: "Fresh description",
     coverSeed: 5,
+    coverImage: "data:image/webp;base64,UklGRg==",
   });
 
   const playlist = getLibrary(user).playlists.find((item) => item.id === playlistId);
   assert.equal(playlist?.name, "After");
   assert.equal(playlist?.description, "Fresh description");
   assert.equal(playlist?.coverSeed, 5);
+  assert.equal(playlist?.coverImage, "data:image/webp;base64,UklGRg==");
+});
+
+test("songs longer than ten minutes are rejected", () => {
+  assert.throws(() => saveTrack(user, {
+    fileId: "too-long",
+    fileUniqueId: "too-long-unique",
+    sourceChatId: 12345,
+    sourceMessageId: 4,
+    title: "Extended mix",
+    artist: "Tester",
+    duration: 601,
+  }), /up to 10 minutes/);
+  assert.equal(getLibrary(user).tracks.some((track) => track.title === "Extended mix"), false);
 });
 
 test("bulk likes and playlist removals are transactional", () => {

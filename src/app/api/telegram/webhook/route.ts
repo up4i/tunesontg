@@ -1,4 +1,4 @@
-import { saveTrackWithStatus, upsertUser, type IncomingTrack } from "@/lib/db";
+import { MAX_TRACK_DURATION_SECONDS, saveTrackWithStatus, upsertUser, type IncomingTrack } from "@/lib/db";
 import { appUrl, callTelegram } from "@/lib/telegram";
 import type { TelegramUser } from "@/lib/types";
 
@@ -111,7 +111,7 @@ function incomingTrack(message: TelegramMessage): IncomingTrack | null {
 async function sendWelcome(chatId: number, firstName: string): Promise<void> {
   await callTelegram("sendMessage", {
     chat_id: chatId,
-    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me an audio file and I’ll add it to your library. Open the app to build playlists and play your music without leaving Telegram.`,
+    text: `Hey ${firstName} — this is your music inbox. 🎧\n\nSend or forward me a Music/Audio track up to 10 minutes long and I’ll add it to your library. Open the app to build playlists and play your music without leaving Telegram.`,
     reply_markup: {
       inline_keyboard: [[{ text: "Open my library", web_app: { url: appUrl() } }]],
     },
@@ -147,8 +147,25 @@ export async function POST(request: Request): Promise<Response> {
       return Response.json({ ok: true });
     }
 
+    if (!message.audio && isAudioDocument(message.document)) {
+      await callTelegram("sendMessage", {
+        chat_id: message.chat.id,
+        text: "Please send this using Telegram’s Music/Audio option instead of as a document. That lets me verify the 10-minute song limit before adding it.",
+        reply_to_message_id: message.message_id,
+      });
+      return Response.json({ ok: true, rejected: "duration_unknown" });
+    }
+
     const trackInput = incomingTrack(message);
     if (trackInput) {
+      if (trackInput.duration > MAX_TRACK_DURATION_SECONDS) {
+        await callTelegram("sendMessage", {
+          chat_id: message.chat.id,
+          text: "This song is longer than 10 minutes, so I couldn’t add it. Please send an audio track that is 10 minutes or shorter.",
+          reply_to_message_id: message.message_id,
+        });
+        return Response.json({ ok: true, rejected: "duration_limit" });
+      }
       const { track, created, possibleDuplicate } = saveTrackWithStatus(message.from, trackInput);
       await callTelegram("sendMessage", {
         chat_id: message.chat.id,
@@ -167,7 +184,7 @@ export async function POST(request: Request): Promise<Response> {
 
     await callTelegram("sendMessage", {
       chat_id: message.chat.id,
-      text: "Send me a Telegram audio track or an audio file, and I’ll save it to your library.",
+      text: "Send me a Telegram Music/Audio track up to 10 minutes long, and I’ll save it to your library.",
       reply_markup: {
         inline_keyboard: [[{ text: "Open library", web_app: { url: appUrl() } }]],
       },

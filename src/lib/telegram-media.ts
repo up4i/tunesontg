@@ -9,6 +9,35 @@ type TelegramFile = {
   file_path?: string;
 };
 
+type TelegramFileCacheEntry = {
+  expiresAt: number;
+  file?: TelegramFile;
+  pending?: Promise<TelegramFile>;
+};
+
+declare global {
+  var __telegramFileCache: Map<string, TelegramFileCacheEntry> | undefined;
+}
+
+async function resolveTelegramFile(fileId: string): Promise<TelegramFile> {
+  const cache = global.__telegramFileCache ??= new Map();
+  const cached = cache.get(fileId);
+  if (cached?.file && cached.expiresAt > Date.now()) return cached.file;
+  if (cached?.pending) return cached.pending;
+
+  const pending = callTelegram<TelegramFile>("getFile", { file_id: fileId })
+    .then((file) => {
+      cache.set(fileId, { file, expiresAt: Date.now() + 5 * 60_000 });
+      return file;
+    })
+    .catch((error) => {
+      cache.delete(fileId);
+      throw error;
+    });
+  cache.set(fileId, { pending, expiresAt: Date.now() + 30_000 });
+  return pending;
+}
+
 export class MediaProxyError extends Error {
   constructor(message: string, readonly status = 502) {
     super(message);
@@ -31,9 +60,7 @@ export async function proxyTelegramFile(
     );
   }
 
-  const telegramFile = await callTelegram<TelegramFile>("getFile", {
-    file_id: input.fileId,
-  });
+  const telegramFile = await resolveTelegramFile(input.fileId);
   if (!telegramFile.file_path) {
     throw new MediaProxyError("Telegram did not return a downloadable file path.");
   }

@@ -9,6 +9,8 @@ import type {
   Track,
 } from "@/lib/types";
 
+export const MAX_TRACK_DURATION_SECONDS = 10 * 60;
+
 type UserRow = {
   id: string;
   telegram_id: string;
@@ -38,6 +40,7 @@ type PlaylistRow = {
   name: string;
   description: string;
   cover_seed: number | null;
+  cover_image: string | null;
   kind: "standard" | "liked";
   visibility: "private" | "public";
   created_at: string;
@@ -92,6 +95,7 @@ function database(): Database.Database {
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       cover_seed INTEGER,
+      cover_image TEXT,
       kind TEXT NOT NULL DEFAULT 'standard',
       visibility TEXT NOT NULL DEFAULT 'private',
       share_id TEXT,
@@ -162,6 +166,9 @@ function database(): Database.Database {
   }
   if (!playlistColumns.some((column) => column.name === "cover_seed")) {
     db.exec("ALTER TABLE playlists ADD COLUMN cover_seed INTEGER");
+  }
+  if (!playlistColumns.some((column) => column.name === "cover_image")) {
+    db.exec("ALTER TABLE playlists ADD COLUMN cover_image TEXT");
   }
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_playlists_owner_liked
@@ -250,6 +257,9 @@ export function saveTrackWithStatus(
   user: TelegramUser,
   track: IncomingTrack,
 ): { track: Track; created: boolean; possibleDuplicate: Track | null } {
+  if (track.duration > MAX_TRACK_DURATION_SECONDS) {
+    throw new Error("Songs can be up to 10 minutes long.");
+  }
   const db = database();
   const owner = upsertUser(user);
   const existing = db.prepare(`
@@ -394,6 +404,7 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     name: row.name,
     description: row.description,
     coverSeed: row.cover_seed,
+    coverImage: row.cover_image,
     kind: row.kind,
     visibility: row.visibility,
     createdAt: row.created_at,
@@ -476,14 +487,14 @@ export function createPlaylist(
 export function updatePlaylistDetails(
   user: TelegramUser,
   playlistId: string,
-  input: { name: string; description: string; coverSeed: number | null },
+  input: { name: string; description: string; coverSeed: number | null; coverImage: string | null },
 ): void {
   const owner = upsertUser(user);
   const result = database().prepare(`
     UPDATE playlists
-    SET name = ?, description = ?, cover_seed = ?, updated_at = ?
+    SET name = ?, description = ?, cover_seed = ?, cover_image = ?, updated_at = ?
     WHERE id = ? AND owner_id = ? AND kind = 'standard'
-  `).run(input.name, input.description, input.coverSeed, now(), playlistId, owner.id);
+  `).run(input.name, input.description, input.coverSeed, input.coverImage, now(), playlistId, owner.id);
   if (!result.changes) throw new Error("Playlist was not found.");
 }
 
@@ -707,7 +718,7 @@ export function importSharedSong(
 export function getSharedPlaylistPreview(shareId: string): SharedPlaylistPreview | null {
   const db = database();
   const playlist = db.prepare(`
-    SELECT p.id, p.name, p.description, u.first_name AS owner_name
+    SELECT p.id, p.name, p.description, p.cover_seed, p.cover_image, u.first_name AS owner_name
     FROM playlists p
     JOIN users u ON u.id = p.owner_id
     WHERE p.share_id = ? AND p.visibility = 'public' AND p.kind = 'standard'
@@ -715,6 +726,8 @@ export function getSharedPlaylistPreview(shareId: string): SharedPlaylistPreview
     id: string;
     name: string;
     description: string;
+    cover_seed: number | null;
+    cover_image: string | null;
     owner_name: string;
   } | undefined;
   if (!playlist) return null;
@@ -724,6 +737,8 @@ export function getSharedPlaylistPreview(shareId: string): SharedPlaylistPreview
     shareId,
     name: playlist.name,
     description: playlist.description,
+    coverSeed: playlist.cover_seed,
+    coverImage: playlist.cover_image,
     ownerName: playlist.owner_name,
     trackCount: tracks.length,
     duration: tracks.reduce((total, track) => total + track.duration, 0),
