@@ -3,21 +3,27 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
+import { POST as sendQueue } from "../src/app/api/play/route";
 import {
   addTracksToPlaylist,
+  createBugReport,
   createPlaylistShare,
   createPlaylist,
   createTrackShare,
+  deleteTracks,
   deletePlaylist,
   getLibrary,
   getSharedPlaylistPreview,
   getSharedSongPreview,
   importSharedSong,
   recordTrackPlayed,
+  removeTracksFromPlaylist,
   saveTrack,
   saveTrackWithStatus,
+  setTracksLiked,
   setTrackLiked,
   setPlaylistVisibility,
+  updatePlaylistDetails,
   upsertUser,
 } from "../src/lib/db";
 import type { TelegramUser } from "../src/lib/types";
@@ -157,4 +163,178 @@ test("only public playlists can be opened from a share link", () => {
 
   setPlaylistVisibility(user, playlistId, "private");
   assert.equal(getSharedPlaylistPreview(shareId), null);
+});
+
+test("a playlist can be created with selected songs and move them atomically", () => {
+  const first = saveTrack(user, {
+    fileId: "atomic-one",
+    fileUniqueId: "atomic-unique-one",
+    sourceChatId: 12345,
+    sourceMessageId: 101,
+    title: "Atomic First",
+    artist: "Tester",
+    duration: 121,
+  });
+  const second = saveTrack(user, {
+    fileId: "atomic-two",
+    fileUniqueId: "atomic-unique-two",
+    sourceChatId: 12345,
+    sourceMessageId: 102,
+    title: "Atomic Second",
+    artist: "Tester",
+    duration: 182,
+  });
+  const sourceId = createPlaylist(user, { name: "Move source" });
+  addTracksToPlaylist(user, sourceId, [first.id, second.id]);
+
+  const targetId = createPlaylist(user, {
+    name: "Created from selection",
+    trackIds: [first.id, second.id],
+    moveFromPlaylistId: sourceId,
+  });
+  const library = getLibrary(user);
+  assert.deepEqual(
+    library.playlists.find((playlist) => playlist.id === targetId)?.tracks.map((track) => track.id),
+    [first.id, second.id],
+  );
+  assert.equal(library.playlists.find((playlist) => playlist.id === sourceId)?.trackCount, 0);
+
+  assert.throws(() => createPlaylist(user, {
+    name: "Must roll back",
+    trackIds: ["missing-track"],
+  }), /not found/i);
+  assert.equal(getLibrary(user).playlists.some((playlist) => playlist.name === "Must roll back"), false);
+
+  assert.throws(() => createPlaylist(user, {
+    name: "Must not fake a move",
+    trackIds: [first.id],
+    moveFromPlaylistId: sourceId,
+  }), /source playlist/i);
+  assert.equal(getLibrary(user).playlists.some((playlist) => playlist.name === "Must not fake a move"), false);
+});
+
+test("Telegram queue API rejects empty and oversized requests", async () => {
+  process.env.DEV_TELEGRAM_ID = String(user.id);
+  try {
+    const emptyResponse = await sendQueue(new Request("http://localhost/api/play", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trackIds: [] }),
+    }));
+    assert.equal(emptyResponse.status, 400);
+
+    const oversizedResponse = await sendQueue(new Request("http://localhost/api/play", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ trackIds: Array.from({ length: 31 }, (_, index) => `track-${index}`) }),
+    }));
+    assert.equal(oversizedResponse.status, 400);
+  } finally {
+    delete process.env.DEV_TELEGRAM_ID;
+  }
+});
+
+test("playlist details and generated cover can be edited", () => {
+  const playlistId = createPlaylist(user, { name: "Before", description: "Old description" });
+
+  updatePlaylistDetails(user, playlistId, {
+    name: "After",
+    description: "Fresh description",
+    coverSeed: 5,
+  });
+
+  const playlist = getLibrary(user).playlists.find((item) => item.id === playlistId);
+  assert.equal(playlist?.name, "After");
+  assert.equal(playlist?.description, "Fresh description");
+  assert.equal(playlist?.coverSeed, 5);
+});
+
+test("bulk likes and playlist removals are transactional", () => {
+  const first = saveTrack(user, {
+    fileId: "bulk-one",
+    fileUniqueId: "bulk-unique-one",
+    sourceChatId: 12345,
+    sourceMessageId: 31,
+    title: "Bulk First",
+    artist: "Tester",
+    duration: 121,
+  });
+  const second = saveTrack(user, {
+    fileId: "bulk-two",
+    fileUniqueId: "bulk-unique-two",
+    sourceChatId: 12345,
+    sourceMessageId: 32,
+    title: "Bulk Second",
+    artist: "Tester",
+    duration: 181,
+  });
+  const playlistId = createPlaylist(user, { name: "Bulk playlist" });
+  addTracksToPlaylist(user, playlistId, [first.id, second.id]);
+
+  assert.equal(setTracksLiked(user, [first.id, second.id], true), 2);
+  assert.equal((getLibrary(user).playlists.find((item) => item.kind === "liked")?.trackCount ?? 0) >= 2, true);
+  assert.equal(removeTracksFromPlaylist(user, playlistId, [first.id, second.id]), 2);
+  assert.equal(getLibrary(user).playlists.find((item) => item.id === playlistId)?.trackCount, 0);
+});
+
+test("removing songs from the library cascades to playlists and history", () => {
+  const track = saveTrack(user, {
+    fileId: "delete-me",
+    fileUniqueId: "delete-me-unique",
+    sourceChatId: 12345,
+    sourceMessageId: 41,
+    title: "Delete Me",
+    artist: "Tester",
+    duration: 90,
+  });
+  const playlistId = createPlaylist(user, { name: "Deletion cascade" });
+  addTracksToPlaylist(user, playlistId, [track.id]);
+  recordTrackPlayed(user, track.id);
+
+  assert.equal(deleteTracks(user, [track.id]), 1);
+  const library = getLibrary(user);
+  assert.equal(library.tracks.some((item) => item.id === track.id), false);
+  assert.equal(library.recentlyPlayed.some((item) => item.id === track.id), false);
+  assert.equal(library.playlists.find((item) => item.id === playlistId)?.trackCount, 0);
+  assert.throws(() => deleteTracks(user, [track.id]), /not found/);
+});
+
+test("similar metadata warns about a possible duplicate without blocking the import", () => {
+  saveTrack(user, {
+    fileId: "similar-one",
+    fileUniqueId: "similar-unique-one",
+    sourceChatId: 12345,
+    sourceMessageId: 51,
+    title: "Soft Focus",
+    artist: "June & The Satellites",
+    duration: 216,
+  });
+  const result = saveTrackWithStatus(user, {
+    fileId: "similar-two",
+    fileUniqueId: "similar-unique-two",
+    sourceChatId: 12345,
+    sourceMessageId: 52,
+    title: "Soft Focus!",
+    artist: "June & The Satellites!",
+    duration: 218,
+  });
+
+  assert.equal(result.created, true);
+  assert.equal(result.possibleDuplicate?.title, "Soft Focus");
+});
+
+test("bug reports store only the supplied sanitized context", () => {
+  const id = createBugReport(user, {
+    description: "The volume panel overlaps the secure streaming label.",
+    context: { platform: "tdesktop", telegramVersion: "9.0" },
+  });
+  const row = globalThis.__tunesDb?.prepare("SELECT * FROM bug_reports WHERE id = ?").get(id) as {
+    description: string;
+    context_json: string;
+  } | undefined;
+  assert.equal(row?.description, "The volume panel overlaps the secure streaming label.");
+  assert.deepEqual(JSON.parse(row?.context_json ?? "{}"), {
+    platform: "tdesktop",
+    telegramVersion: "9.0",
+  });
 });

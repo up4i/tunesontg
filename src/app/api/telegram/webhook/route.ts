@@ -149,11 +149,13 @@ export async function POST(request: Request): Promise<Response> {
 
     const trackInput = incomingTrack(message);
     if (trackInput) {
-      const { track, created } = saveTrackWithStatus(message.from, trackInput);
+      const { track, created, possibleDuplicate } = saveTrackWithStatus(message.from, trackInput);
       await callTelegram("sendMessage", {
         chat_id: message.chat.id,
         text: created
-          ? `Saved “${track.title}” by ${track.artist} to your library.`
+          ? possibleDuplicate
+            ? `Saved “${track.title}” by ${track.artist}. It may duplicate “${possibleDuplicate.title}” by ${possibleDuplicate.artist}, so check your library when convenient.`
+            : `Saved “${track.title}” by ${track.artist} to your library.`
           : `“${track.title}” by ${track.artist} is already in your library. I didn’t add a duplicate.`,
         reply_to_message_id: message.message_id,
         reply_markup: {

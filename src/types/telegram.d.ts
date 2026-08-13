@@ -9,13 +9,16 @@ declare global {
           start_param?: string;
         };
         version: string;
+        platform: string;
         colorScheme: "light" | "dark";
         ready(): void;
         expand(): void;
         close(): void;
         openTelegramLink(url: string): void;
-        onEvent(eventType: "themeChanged", callback: () => void): void;
-        offEvent(eventType: "themeChanged", callback: () => void): void;
+        addToHomeScreen?(): void;
+        checkHomeScreenStatus?(callback: (status: "unsupported" | "unknown" | "added" | "missed") => void): void;
+        onEvent(eventType: "themeChanged" | "homeScreenAdded" | "homeScreenChecked", callback: (...args: unknown[]) => void): void;
+        offEvent(eventType: "themeChanged" | "homeScreenAdded" | "homeScreenChecked", callback: (...args: unknown[]) => void): void;
         isVersionAtLeast(version: string): boolean;
         setHeaderColor(color: string): void;
         setBackgroundColor(color: string): void;

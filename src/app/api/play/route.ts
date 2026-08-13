@@ -17,10 +17,15 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const user = getAuthenticatedUser(request);
     const body = await request.json() as { trackIds?: unknown; shuffle?: unknown };
-    if (!Array.isArray(body.trackIds) || body.trackIds.some((id) => typeof id !== "string")) {
-      return Response.json({ error: "Choose one or more tracks." }, { status: 400 });
+    if (
+      !Array.isArray(body.trackIds)
+      || !body.trackIds.length
+      || body.trackIds.length > 30
+      || body.trackIds.some((id) => typeof id !== "string")
+    ) {
+      return Response.json({ error: "Choose between 1 and 30 tracks." }, { status: 400 });
     }
-    const requestedIds = [...new Set(body.trackIds as string[])].slice(0, 30);
+    const requestedIds = [...new Set(body.trackIds as string[])];
     let tracks = getOwnedTracks(user, requestedIds);
     if (tracks.length !== requestedIds.length) {
       return Response.json({ error: "One or more tracks were not found." }, { status: 404 });
