@@ -1,6 +1,7 @@
 import { AuthenticationError, getAuthenticatedUser } from "@/lib/auth";
 import {
   getSharedPlaylistPreview,
+  getPublicProfile,
   getSharedSongPreview,
   importSharedPlaylist,
   importSharedSong,
@@ -9,7 +10,7 @@ import {
 export const runtime = "nodejs";
 
 function validToken(token: string): boolean {
-  return /^[sp]_[a-f\d]{32}$/.test(token);
+  return /^[spu]_[a-f\d]{32}$/.test(token);
 }
 
 export async function GET(
@@ -22,7 +23,9 @@ export async function GET(
     if (!validToken(token)) return Response.json({ error: "This shared link is invalid." }, { status: 400 });
     const preview = token.startsWith("s_")
       ? getSharedSongPreview(user, token.slice(2))
-      : getSharedPlaylistPreview(user, token.slice(2));
+      : token.startsWith("p_")
+        ? getSharedPlaylistPreview(user, token.slice(2))
+        : getPublicProfile(token.slice(2));
     if (!preview) return Response.json({ error: "This shared item is unavailable." }, { status: 404 });
     return Response.json(preview);
   } catch (error) {
@@ -40,6 +43,9 @@ export async function POST(
     const { token } = await context.params;
     if (!validToken(token)) {
       return Response.json({ error: "This shared link is invalid." }, { status: 400 });
+    }
+    if (token.startsWith("u_")) {
+      return Response.json({ error: "Profiles cannot be added to your library." }, { status: 400 });
     }
     if (token.startsWith("p_")) {
       const result = importSharedPlaylist(user, token.slice(2));

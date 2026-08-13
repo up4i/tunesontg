@@ -18,6 +18,7 @@ function track(id: string, playable = true): Track {
     hasCustomArtwork: false,
     playable,
     liked: false,
+    owned: true,
     streamUrl: playable ? `/stream/${id}` : undefined,
   };
 }

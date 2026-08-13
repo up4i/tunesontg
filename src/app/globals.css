@@ -1221,6 +1221,26 @@ html[data-theme="light"] .bottom-nav button.active {
   gap: 5px;
   min-width: 68px;
   padding: 2px 8px;
+  position: relative;
+}
+
+.nav-notification-badge {
+  align-items: center;
+  background: var(--orange);
+  border: 2px solid var(--canvas);
+  border-radius: 999px;
+  color: #fff;
+  display: flex;
+  font-size: 7px;
+  font-style: normal;
+  font-weight: 800;
+  height: 17px;
+  justify-content: center;
+  min-width: 17px;
+  padding: 0 3px;
+  position: absolute;
+  right: 17px;
+  top: -3px;
 }
 
 .bottom-nav button.active {
@@ -3092,6 +3112,312 @@ html[data-theme="light"] .bottom-nav button.active {
   height: 53px;
   margin-bottom: 10px;
   width: 100%;
+}
+
+.recommendation-note {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+  margin: -8px 0 10px;
+}
+
+.playlist-folder-strip {
+  display: flex;
+  gap: 9px;
+  margin: -9px -22px 23px;
+  overflow-x: auto;
+  padding: 0 22px 5px;
+  scrollbar-width: none;
+}
+
+.playlist-folder-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.playlist-folder-strip > button {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 9px;
+  min-width: 150px;
+  padding: 10px 11px;
+  text-align: left;
+}
+
+.playlist-folder-strip > button > svg:first-child {
+  color: var(--lime);
+  height: 18px;
+  width: 18px;
+}
+
+.playlist-folder-strip > button > svg:last-child {
+  color: var(--subtle);
+  height: 12px;
+  margin-left: auto;
+  width: 12px;
+}
+
+.playlist-folder-strip strong,
+.playlist-folder-strip small {
+  display: block;
+}
+
+.playlist-folder-strip strong {
+  font-size: 10px;
+}
+
+.playlist-folder-strip small {
+  color: var(--subtle);
+  font-size: 8px;
+  margin-top: 3px;
+}
+
+.playlist-card-badge {
+  align-items: center;
+  color: var(--lime);
+  display: flex;
+  font-size: 8px;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.playlist-card-badge svg {
+  height: 10px;
+  width: 10px;
+}
+
+.followed-playlists-section,
+.profile-public-playlists,
+.activity-card {
+  margin-top: 30px;
+}
+
+.followed-playlists-section .section-heading,
+.profile-public-playlists .section-heading,
+.activity-card .section-heading {
+  margin-bottom: 15px;
+}
+
+.profile-bio {
+  line-height: 1.55;
+  margin-top: 14px !important;
+  max-width: 330px;
+  text-align: center;
+}
+
+.profile-bio-empty,
+.profile-section-empty {
+  color: var(--subtle) !important;
+}
+
+.profile-social-stats {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 15px;
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 21px;
+  padding-top: 17px;
+  width: 100%;
+}
+
+.profile-social-stats span {
+  color: var(--subtle);
+  font-size: 8px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.profile-social-stats strong {
+  color: var(--ink);
+  display: block;
+  font-size: 15px;
+  margin-bottom: 3px;
+}
+
+.profile-section-empty {
+  font-size: 10px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.compact-playlist-grid,
+.shared-profile-playlists {
+  gap: 18px 12px;
+}
+
+.activity-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 18px;
+}
+
+.activity-item {
+  align-items: center;
+  background: transparent;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 11px;
+  padding: 12px 2px;
+  text-align: left;
+  width: 100%;
+}
+
+.activity-item > span {
+  align-items: center;
+  background: var(--panel-2);
+  border-radius: 50%;
+  color: var(--muted);
+  display: flex;
+  flex: 0 0 32px;
+  height: 32px;
+  justify-content: center;
+}
+
+.activity-item.unread > span {
+  background: var(--lime-soft);
+  color: var(--lime);
+}
+
+.activity-item svg {
+  height: 13px;
+  width: 13px;
+}
+
+.activity-item div {
+  min-width: 0;
+}
+
+.activity-item p,
+.activity-item small {
+  display: block;
+  margin: 0;
+}
+
+.activity-item p {
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.activity-item small {
+  color: var(--subtle);
+  font-size: 8px;
+  margin-top: 4px;
+}
+
+.playlist-folder-select {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 8px 11px;
+}
+
+.playlist-folder-select svg {
+  color: var(--lime);
+  height: 14px;
+  width: 14px;
+}
+
+.playlist-folder-select span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.playlist-folder-select select {
+  background: var(--panel-2);
+  border: 0;
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 9px;
+  margin-left: auto;
+  outline: 0;
+  padding: 7px 10px;
+}
+
+.collaborator-actions {
+  align-items: center;
+}
+
+.collaborator-actions > span,
+.shared-playlist-social {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 9px;
+  gap: 5px;
+}
+
+.collaborator-actions > span svg,
+.shared-playlist-social svg {
+  color: var(--lime);
+  height: 12px;
+  width: 12px;
+}
+
+.playlist-select-all {
+  margin-top: 2px;
+}
+
+.profile-photo-preview {
+  align-items: center;
+  background: var(--lime);
+  border-radius: 50%;
+  color: var(--canvas) !important;
+  display: flex !important;
+  flex: 0 0 50px;
+  height: 50px;
+  justify-content: center;
+  margin: 0 !important;
+  overflow: hidden;
+  width: 50px;
+}
+
+.profile-photo-preview img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.remove-profile-photo {
+  margin: -4px 0 11px;
+}
+
+.destructive-button {
+  color: #ff8585;
+  margin-top: 10px;
+}
+
+.shared-profile-card {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 26px;
+  text-align: center;
+}
+
+.shared-profile-card p {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+  max-width: 310px;
+}
+
+.shared-playlist-social {
+  justify-content: center;
+  margin: 8px 0 16px;
+}
+
+.shared-playlist-actions {
+  display: grid;
+  gap: 9px;
+  margin-top: 15px;
 }
 
 .spin {

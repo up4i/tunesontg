@@ -1,5 +1,5 @@
 import { AuthenticationError, getAuthenticatedUser } from "@/lib/auth";
-import { deletePlaylist, setPlaylistVisibility, updatePlaylistDetails } from "@/lib/db";
+import { deletePlaylist, setPlaylistCollaborative, setPlaylistFolder, setPlaylistVisibility, updatePlaylistDetails } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -31,10 +31,21 @@ export async function PATCH(
       description?: unknown;
       coverSeed?: unknown;
       coverImage?: unknown;
+      collaborative?: unknown;
+      folderId?: unknown;
     };
     if (body.visibility === "private" || body.visibility === "public") {
       setPlaylistVisibility(user, id, body.visibility);
       return Response.json({ ok: true, visibility: body.visibility });
+    }
+    if (typeof body.collaborative === "boolean") {
+      setPlaylistCollaborative(user, id, body.collaborative);
+      return Response.json({ ok: true, collaborative: body.collaborative });
+    }
+    if (body.folderId === null || typeof body.folderId === "string") {
+      const folderId = typeof body.folderId === "string" && body.folderId.trim() ? body.folderId.trim() : null;
+      setPlaylistFolder(user, id, folderId);
+      return Response.json({ ok: true, folderId });
     }
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const description = typeof body.description === "string" ? body.description.trim() : "";

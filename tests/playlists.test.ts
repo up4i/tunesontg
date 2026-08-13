@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { POST as sendQueue } from "../src/app/api/play/route";
+import { GET as getLibraryResponse } from "../src/app/api/library/route";
 import {
   addTracksToPlaylist,
+  createPlaylistFolder,
   createBugReport,
   createPlaylistShare,
   createPlaylist,
@@ -13,21 +15,31 @@ import {
   deleteTracks,
   deletePlaylist,
   getLibrary,
+  getPublicProfile,
+  getPublicProfileId,
   getPlaybackFile,
   getSharedPlaylistPreview,
   getSharedSongPreview,
   importSharedPlaylist,
   importSharedSong,
+  joinCollaborativePlaylist,
+  leaveCollaborativePlaylist,
+  markNotificationsRead,
   recordPlaybackEvents,
   recordTrackPlayed,
   removeTracksFromPlaylist,
   saveTrack,
   saveTrackWithStatus,
+  saveAccessibleTrackToLibrary,
+  setPlaylistCollaborative,
+  setPlaylistFolder,
+  setPlaylistFollow,
   setTracksLiked,
   setTrackLiked,
   setPlaylistVisibility,
   updatePlaylistDetails,
   updateTrackDetails,
+  updateProfile,
   upsertUser,
 } from "../src/lib/db";
 import type { TelegramUser } from "../src/lib/types";
@@ -401,4 +413,125 @@ test("bug reports store only the supplied sanitized context", () => {
     platform: "tdesktop",
     telegramVersion: "9.0",
   });
+});
+
+test("profiles expose editable details and only public playlists", () => {
+  const profileUser: TelegramUser = { id: 70001, first_name: "Profile Listener", username: "profile_listener" };
+  updateProfile(profileUser, {
+    displayName: "June Listener",
+    bio: "Ambient, soul, and quiet discoveries.",
+    customPhoto: "data:image/webp;base64,UklGRg==",
+  });
+  const privatePlaylist = createPlaylist(profileUser, { name: "Private notes" });
+  const publicPlaylist = createPlaylist(profileUser, { name: "Sunday light" });
+  setPlaylistVisibility(profileUser, publicPlaylist, "public");
+
+  const library = getLibrary(profileUser);
+  assert.equal(library.user.displayName, "June Listener");
+  assert.equal(library.user.bio, "Ambient, soul, and quiet discoveries.");
+  assert.equal(library.user.hasCustomPhoto, true);
+  assert.match(library.user.photoUrl ?? "", /\/api\/profiles\/[a-f\d]{32}\/photo/);
+
+  const profile = getPublicProfile(getPublicProfileId(profileUser));
+  assert.equal(profile?.displayName, "June Listener");
+  assert.deepEqual(profile?.playlists.map((playlist) => playlist.name), ["Sunday light"]);
+  assert.equal(profile?.playlists.some((playlist) => playlist.name === "Private notes"), false);
+  assert.ok(privatePlaylist);
+});
+
+test("playlist folders organize owned playlists", () => {
+  const folderUser: TelegramUser = { id: 70002, first_name: "Folder Listener" };
+  const playlistId = createPlaylist(folderUser, { name: "Long drives" });
+  const folderId = createPlaylistFolder(folderUser, "Trips");
+  setPlaylistFolder(folderUser, playlistId, folderId);
+
+  const library = getLibrary(folderUser);
+  assert.equal(library.playlistFolders.find((folder) => folder.id === folderId)?.playlistCount, 1);
+  assert.equal(library.playlists.find((playlist) => playlist.id === playlistId)?.folderId, folderId);
+});
+
+test("following and collaborative playlists preserve ownership boundaries and activity", () => {
+  const collaborationOwner: TelegramUser = { id: 70003, first_name: "Playlist Owner" };
+  const collaborator: TelegramUser = { id: 70004, first_name: "Helpful Curator" };
+  const ownerTrack = saveTrack(collaborationOwner, {
+    fileId: "collaboration-owner-file",
+    fileUniqueId: "collaboration-owner-unique",
+    sourceChatId: collaborationOwner.id,
+    sourceMessageId: 1,
+    title: "Owner Song",
+    artist: "Shared Artist",
+    duration: 201,
+  });
+  const collaboratorTrack = saveTrack(collaborator, {
+    fileId: "collaboration-guest-file",
+    fileUniqueId: "collaboration-guest-unique",
+    sourceChatId: collaborator.id,
+    sourceMessageId: 2,
+    title: "Guest Song",
+    artist: "Guest Artist",
+    duration: 176,
+  });
+  const playlistId = createPlaylist(collaborationOwner, { name: "Open table" });
+  addTracksToPlaylist(collaborationOwner, playlistId, [ownerTrack.id]);
+  setPlaylistVisibility(collaborationOwner, playlistId, "public");
+  setPlaylistCollaborative(collaborationOwner, playlistId, true);
+  const shareId = createPlaylistShare(collaborationOwner, playlistId);
+
+  assert.equal(setPlaylistFollow(collaborator, shareId, true), true);
+  assert.equal(getLibrary(collaborator).followedPlaylists.some((playlist) => playlist.shareId === shareId), true);
+  assert.equal(joinCollaborativePlaylist(collaborator, shareId).changed, true);
+  assert.equal(addTracksToPlaylist(collaborator, playlistId, [collaboratorTrack.id]), 1);
+
+  const collaboratorView = getLibrary(collaborator).playlists.find((playlist) => playlist.id === playlistId);
+  assert.equal(collaboratorView?.access, "collaborator");
+  assert.equal(collaboratorView?.tracks.find((track) => track.id === ownerTrack.id)?.owned, false);
+  assert.ok(getPlaybackFile(String(collaborator.id), ownerTrack.id));
+  recordTrackPlayed(collaborator, ownerTrack.id);
+  assert.equal(getLibrary(collaborator).recentlyPlayed.find((track) => track.id === ownerTrack.id)?.owned, false);
+  const savedOwnerTrack = saveAccessibleTrackToLibrary(collaborator, ownerTrack.id);
+  assert.equal(savedOwnerTrack.created, true);
+  assert.equal(addTracksToPlaylist(collaborator, playlistId, [savedOwnerTrack.track.id]), 0);
+
+  const ownerActivity = getLibrary(collaborationOwner);
+  assert.equal(ownerActivity.notifications.some((notification) => notification.message.includes("Helpful Curator added 1 song")), true);
+  assert.ok(ownerActivity.unreadNotifications > 0);
+  assert.ok(markNotificationsRead(collaborationOwner) > 0);
+  assert.equal(getLibrary(collaborationOwner).unreadNotifications, 0);
+
+  setPlaylistCollaborative(collaborationOwner, playlistId, false);
+  assert.throws(() => addTracksToPlaylist(collaborator, playlistId, [collaboratorTrack.id]), /paused/);
+  assert.equal(leaveCollaborativePlaylist(collaborator, playlistId), true);
+  assert.equal(getLibrary(collaborator).recentlyPlayed.some((track) => track.id === ownerTrack.id), false);
+  assert.equal(deleteTracks(collaborator, [collaboratorTrack.id]), 1);
+  assert.equal(
+    getLibrary(collaborationOwner).notifications.some((notification) => notification.message.includes("removed 1 song from their library")),
+    true,
+  );
+});
+
+test("recommendations contain only playable tracks from the listener's own library", async () => {
+  const recommendationUser: TelegramUser = { id: 70005, first_name: "Recommendation Listener" };
+  const tracks = [
+    saveTrack(recommendationUser, { fileId: "rec-a", fileUniqueId: "rec-a-unique", sourceChatId: recommendationUser.id, sourceMessageId: 1, title: "One", artist: "Same Artist", duration: 100 }),
+    saveTrack(recommendationUser, { fileId: "rec-b", fileUniqueId: "rec-b-unique", sourceChatId: recommendationUser.id, sourceMessageId: 2, title: "Two", artist: "Same Artist", duration: 110 }),
+    saveTrack(recommendationUser, { fileId: "rec-c", fileUniqueId: "rec-c-unique", sourceChatId: recommendationUser.id, sourceMessageId: 3, title: "Three", artist: "Another Artist", duration: 120 }),
+  ];
+  setTrackLiked(recommendationUser, tracks[0].id, true);
+  recordTrackPlayed(recommendationUser, tracks[2].id);
+
+  const library = getLibrary(recommendationUser);
+  const ownedIds = new Set(library.tracks.map((track) => track.id));
+  assert.ok(library.recommendations.length > 0);
+  assert.equal(library.recommendations.every((track) => ownedIds.has(track.id) && track.owned), true);
+  assert.equal(library.recommendations[0]?.id, tracks[1].id);
+
+  process.env.DEV_TELEGRAM_ID = String(recommendationUser.id);
+  try {
+    const response = await getLibraryResponse(new Request("http://localhost/api/library"));
+    const payload = await response.json() as { recommendations: Array<{ id: string; streamUrl?: string }> };
+    assert.equal(response.status, 200);
+    assert.equal(payload.recommendations.every((track) => Boolean(track.streamUrl)), true);
+  } finally {
+    delete process.env.DEV_TELEGRAM_ID;
+  }
 });
