@@ -30,6 +30,7 @@ export async function PATCH(
       name?: unknown;
       description?: unknown;
       coverSeed?: unknown;
+      coverImage?: unknown;
     };
     if (body.visibility === "private" || body.visibility === "public") {
       setPlaylistVisibility(user, id, body.visibility);
@@ -42,11 +43,17 @@ export async function PATCH(
       : Number.isInteger(body.coverSeed) && Number(body.coverSeed) >= 0 && Number(body.coverSeed) <= 7
         ? Number(body.coverSeed)
         : undefined;
-    if (!name || name.length > 60 || description.length > 160 || coverSeed === undefined) {
+    const coverImage = body.coverImage === null
+      ? null
+      : typeof body.coverImage === "string" && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/.test(body.coverImage)
+        ? body.coverImage
+        : undefined;
+    const encodedImageBytes = coverImage ? Math.ceil((coverImage.length - coverImage.indexOf(",") - 1) * 0.75) : 0;
+    if (!name || name.length > 60 || description.length > 160 || coverSeed === undefined || coverImage === undefined || encodedImageBytes > 750_000) {
       return Response.json({ error: "Enter valid playlist details and choose a cover." }, { status: 400 });
     }
-    updatePlaylistDetails(user, id, { name, description, coverSeed });
-    return Response.json({ ok: true, name, description, coverSeed });
+    updatePlaylistDetails(user, id, { name, description, coverSeed, coverImage });
+    return Response.json({ ok: true, name, description, coverSeed, coverImage });
   } catch (error) {
     const status = error instanceof AuthenticationError ? 401 : 404;
     return Response.json({ error: error instanceof Error ? error.message : "Could not update playlist visibility." }, { status });

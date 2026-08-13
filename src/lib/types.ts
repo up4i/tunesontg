@@ -19,6 +19,7 @@ export type Playlist = {
   name: string;
   description: string;
   coverSeed: number | null;
+  coverImage: string | null;
   kind: "standard" | "liked";
   visibility: "private" | "public";
   createdAt: string;
@@ -43,6 +44,8 @@ export type SharedPlaylistPreview = {
   shareId: string;
   name: string;
   description: string;
+  coverSeed: number | null;
+  coverImage: string | null;
   ownerName: string;
   trackCount: number;
   duration: number;
