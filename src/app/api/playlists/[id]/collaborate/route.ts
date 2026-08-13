@@ -1,5 +1,5 @@
 import { AuthenticationError, getAuthenticatedUser } from "@/lib/auth";
-import { leaveCollaborativePlaylist } from "@/lib/db";
+import { leaveCollaborativePlaylist, restoreCollaborativePlaylist } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -11,5 +11,16 @@ export async function DELETE(request: Request, context: { params: Promise<{ id: 
   } catch (error) {
     const status = error instanceof AuthenticationError ? 401 : 404;
     return Response.json({ error: error instanceof Error ? error.message : "Could not leave playlist." }, { status });
+  }
+}
+
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
+  try {
+    const user = getAuthenticatedUser(request);
+    const { id } = await context.params;
+    return Response.json({ restored: restoreCollaborativePlaylist(user, id) });
+  } catch (error) {
+    const status = error instanceof AuthenticationError ? 401 : 404;
+    return Response.json({ error: error instanceof Error ? error.message : "Could not restore collaboration." }, { status });
   }
 }

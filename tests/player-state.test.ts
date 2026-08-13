@@ -19,6 +19,8 @@ function track(id: string, playable = true): Track {
     playable,
     liked: false,
     owned: true,
+    access: "owned",
+    ownerName: null,
     streamUrl: playable ? `/stream/${id}` : undefined,
   };
 }
@@ -41,7 +43,7 @@ test("restores queue order, playback history, repeat, shuffle, and position", ()
   assert.equal(restored?.shuffleEnabled, true);
 });
 
-test("rejects expired state and removes unavailable tracks", () => {
+test("rejects expired state and advances past unavailable tracks", () => {
   const now = Date.now();
   const expired = encodePlayerState({
     queueIds: ["one"], currentTrackId: "one", playbackStackIds: [], currentTime: 2,
@@ -53,5 +55,7 @@ test("rejects expired state and removes unavailable tracks", () => {
     queueIds: ["one", "two"], currentTrackId: "one", playbackStackIds: [], currentTime: 2,
     shuffleEnabled: false, repeatMode: "one",
   }, now);
-  assert.equal(restorePlayerState(currentUnavailable, [track("one", false), track("two")], now), null);
+  const recovered = restorePlayerState(currentUnavailable, [track("one", false), track("two")], now);
+  assert.equal(recovered?.queue[0]?.id, "two");
+  assert.deepEqual(recovered?.unavailableTrackIds, ["one"]);
 });

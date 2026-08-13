@@ -6,8 +6,11 @@ import {
   importSharedPlaylist,
   importSharedSong,
 } from "@/lib/db";
+import { createPlaybackTicket } from "@/lib/playback-ticket";
+import type { Track } from "@/lib/types";
 
 export const runtime = "nodejs";
+const PLAYBACK_TICKET_TTL_SECONDS = 60 * 60 * 6;
 
 function validToken(token: string): boolean {
   return /^[spu]_[a-f\d]{32}$/.test(token);
@@ -25,9 +28,21 @@ export async function GET(
       ? getSharedSongPreview(user, token.slice(2))
       : token.startsWith("p_")
         ? getSharedPlaylistPreview(user, token.slice(2))
-        : getPublicProfile(token.slice(2));
+        : getPublicProfile(token.slice(2), user);
     if (!preview) return Response.json({ error: "This shared item is unavailable." }, { status: 404 });
-    return Response.json(preview);
+    if (preview.type !== "playlist") return Response.json(preview);
+    const decorate = (track: Track): Track => {
+      if (!track.playable) return track;
+      const ticket = createPlaybackTicket(track.id, String(user.id), PLAYBACK_TICKET_TTL_SECONDS);
+      return {
+        ...track,
+        streamUrl: `/api/tracks/${track.id}/stream?ticket=${ticket}`,
+        artworkUrl: track.hasArtwork
+          ? `/api/tracks/${track.id}/artwork?ticket=${ticket}&v=${track.artworkRevision}`
+          : undefined,
+      };
+    };
+    return Response.json({ ...preview, tracks: preview.tracks.map(decorate) });
   } catch (error) {
     const status = error instanceof AuthenticationError ? 401 : 500;
     return Response.json({ error: error instanceof Error ? error.message : "Could not open shared item." }, { status });

@@ -3046,43 +3046,6 @@ html[data-theme="light"] .bottom-nav button.active {
   padding-top: 28px;
 }
 
-.loading-brand {
-  align-items: center;
-  display: flex;
-  gap: 12px;
-  margin-bottom: 28px;
-}
-
-.loading-brand .brand-mark {
-  flex: none;
-  height: 42px;
-  margin: 0;
-  width: 42px;
-}
-
-.loading-brand .brand-mark svg {
-  height: 18px;
-  width: 18px;
-}
-
-.loading-brand strong,
-.loading-brand small {
-  display: block;
-}
-
-.loading-brand strong {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 19px;
-  font-weight: 400;
-  letter-spacing: 0.08em;
-}
-
-.loading-brand small {
-  color: var(--subtle);
-  font-size: 9px;
-  margin-top: 3px;
-}
-
 .skeleton {
   animation: shimmer 1.2s ease-in-out infinite alternate;
   background: var(--panel-2);
@@ -3146,6 +3109,163 @@ html[data-theme="light"] .bottom-nav button.active {
   padding: 10px 11px;
   text-align: left;
 }
+
+.playlist-folder-strip .folder-chip {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 150px;
+  padding: 0 4px 0 0;
+}
+
+.playlist-folder-strip .folder-filter {
+  align-items: center;
+  display: flex;
+  flex: 1;
+  gap: 9px;
+  padding: 10px 5px 10px 11px;
+  text-align: left;
+}
+
+.playlist-folder-strip .folder-filter > svg { color: var(--lime); height: 18px; width: 18px; }
+
+.playlist-folder-strip > button.active {
+  background: var(--lime-soft);
+  border-color: color-mix(in srgb, var(--lime) 52%, var(--line));
+}
+
+.playlist-folder-strip .folder-chip.active { background: var(--lime-soft); border-color: color-mix(in srgb, var(--lime) 52%, var(--line)); }
+
+.playlist-folder-strip .folder-edit {
+  align-items: center;
+  border-radius: 50%;
+  color: var(--subtle);
+  display: flex;
+  height: 26px;
+  justify-content: center;
+  margin-left: auto;
+  width: 26px;
+}
+
+.playlist-folder-strip .folder-edit svg {
+  height: 12px;
+  width: 12px;
+}
+
+.folder-view-heading {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin: -2px 0 18px;
+}
+
+.folder-view-heading h2 { font-size: 20px; margin: 2px 0 0; }
+
+.recommendation-row { border-bottom: 1px solid var(--line); }
+.recommendation-row .track-row { border-bottom: 0; }
+.recommendation-explanation {
+  align-items: center;
+  color: var(--subtle);
+  display: flex;
+  font-size: 8px;
+  justify-content: space-between;
+  padding: 0 5px 8px 54px;
+}
+.recommendation-explanation button { align-items: center; color: var(--muted); display: flex; font-size: 8px; gap: 4px; }
+.recommendation-explanation svg { height: 10px; width: 10px; }
+
+.track-owner-badge { align-items: center; color: var(--lime); display: inline-flex; font-size: 7px; font-style: normal; gap: 3px; margin-left: 6px; }
+.track-owner-badge svg { height: 8px; width: 8px; }
+
+.playlist-collaborators,
+.playlist-activity-log,
+.notification-settings-card,
+.blocked-users-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  margin-top: 16px;
+  padding: 15px;
+  text-align: left;
+}
+
+.playlist-collaborators h2,
+.playlist-activity-log h2 { font-size: 15px; margin: 3px 0 12px; }
+.collaborator-row { align-items: center; border-top: 1px solid var(--line); display: flex; gap: 9px; padding: 10px 0; }
+.collaborator-row > span:nth-child(2) { min-width: 0; flex: 1; }
+.collaborator-row strong, .collaborator-row small { display: block; }
+.collaborator-row strong { font-size: 9px; }
+.collaborator-row small { color: var(--subtle); font-size: 8px; margin-top: 3px; }
+.collaborator-avatar { border-radius: 50%; display: block; height: 30px; overflow: hidden; width: 30px; }
+.collaborator-avatar img, .collaborator-avatar .user-avatar-fallback { height: 100%; width: 100%; }
+.collaborator-row button { align-items: center; color: #ff8585; display: flex; font-size: 8px; gap: 4px; }
+.collaborator-row button svg { height: 12px; width: 12px; }
+
+.playlist-activity-log { margin: 18px 22px 110px; }
+.playlist-activity-log > div:not(:first-child) { align-items: center; border-top: 1px solid var(--line); display: grid; gap: 8px; grid-template-columns: 24px 1fr auto; padding: 10px 0; }
+.playlist-activity-log > div > span { color: var(--lime); }
+.playlist-activity-log svg { height: 12px; width: 12px; }
+.playlist-activity-log p { font-size: 9px; margin: 0; }
+.playlist-activity-log time { color: var(--subtle); font-size: 8px; }
+
+.notification-settings-card { margin-top: 18px; }
+.blocked-users-card { margin-top: 18px; }
+.notification-settings-card > label { align-items: center; border-top: 1px solid var(--line); display: flex; justify-content: space-between; padding: 13px 0; }
+.notification-settings-card > label > span { align-items: center; display: grid; gap: 2px 8px; grid-template-columns: 24px 1fr; }
+.notification-settings-card svg { color: var(--lime); grid-row: span 2; height: 14px; width: 14px; }
+.notification-settings-card strong, .notification-settings-card small { display: block; }
+.notification-settings-card strong { font-size: 9px; }
+.notification-settings-card small { color: var(--subtle); font-size: 8px; }
+
+.offline-banner {
+  align-items: center;
+  background: #4f3218;
+  border-bottom: 1px solid #9d662d;
+  color: #ffd7a4;
+  display: flex;
+  font-size: 9px;
+  gap: 7px;
+  left: 0;
+  line-height: 1.4;
+  padding: calc(8px + var(--safe-top)) 18px 8px;
+  position: sticky;
+  right: 0;
+  top: 0;
+  z-index: 45;
+}
+.offline-banner svg { flex: 0 0 14px; height: 14px; width: 14px; }
+
+.player-error-state { align-items: center; background: rgba(120, 28, 28, .72); border: 1px solid rgba(255, 133, 133, .45); border-radius: 14px; display: flex; gap: 9px; margin: 0 auto 10px; max-width: 340px; padding: 9px 10px; position: relative; z-index: 2; }
+.player-error-state > svg { color: #ff8585; height: 17px; width: 17px; }
+.player-error-state span { flex: 1; }
+.player-error-state strong, .player-error-state small { display: block; }
+.player-error-state strong { font-size: 9px; }
+.player-error-state small { color: rgba(255,255,255,.72); font-size: 8px; margin-top: 2px; }
+.player-error-state button { align-items: center; color: white; display: flex; font-size: 8px; gap: 4px; }
+.player-error-state button svg { height: 11px; width: 11px; }
+.playback-error-copy { color: #ff8585 !important; }
+
+.shared-playlist-tracks > button { align-items: center; background: transparent; border-top: 1px solid var(--line); color: var(--ink); display: flex; gap: 10px; padding: 10px 0; text-align: left; width: 100%; }
+.shared-playlist-tracks > button:disabled { opacity: .55; }
+.shared-playlist-tracks > button > span { flex: 1; min-width: 0; }
+.shared-playlist-tracks > button strong, .shared-playlist-tracks > button small { display: block; }
+.shared-playlist-tracks > button strong { font-size: 9px; }
+.shared-playlist-tracks > button small, .shared-playlist-tracks > button em { color: var(--subtle); font-size: 8px; font-style: normal; }
+.shared-track-play { color: var(--lime); height: 13px; width: 13px; }
+.shared-play-button { margin: 10px 0; }
+.shared-safety-actions { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+.shared-safety-actions button { align-items: center; border: 1px solid var(--line); border-radius: 11px; color: #ff8585; display: flex; font-size: 8px; gap: 5px; justify-content: center; padding: 10px; }
+.shared-safety-actions svg { height: 12px; width: 12px; }
+
+.toast button { color: var(--lime); font-size: 9px; font-weight: 700; margin-left: auto; padding: 6px; text-transform: uppercase; }
+.sheet-form { display: grid; gap: 13px; }
+.sheet-form label span { display: block; font-size: 9px; margin-bottom: 6px; }
+.sheet-form textarea { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); font: inherit; padding: 12px; resize: vertical; width: 100%; }
+.form-hint { color: var(--subtle); font-size: 8px; line-height: 1.5; margin: 0; }
+.sr-only { height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; width: 1px; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 
 .playlist-folder-strip > button > svg:first-child {
   color: var(--lime);

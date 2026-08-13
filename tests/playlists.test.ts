@@ -7,14 +7,18 @@ import { POST as sendQueue } from "../src/app/api/play/route";
 import { GET as getLibraryResponse } from "../src/app/api/library/route";
 import {
   addTracksToPlaylist,
+  blockPublicUser,
   createPlaylistFolder,
   createBugReport,
   createPlaylistShare,
   createPlaylist,
   createTrackShare,
   deleteTracks,
+  dismissRecommendation,
   deletePlaylist,
   getLibrary,
+  getAccessibleTracks,
+  getOwnedTracks,
   getPublicProfile,
   getPublicProfileId,
   getPlaybackFile,
@@ -25,9 +29,12 @@ import {
   joinCollaborativePlaylist,
   leaveCollaborativePlaylist,
   markNotificationsRead,
+  removePlaylistCollaborator,
   recordPlaybackEvents,
   recordTrackPlayed,
   removeTracksFromPlaylist,
+  reportPublicContent,
+  restoreTracksToPlaylist,
   saveTrack,
   saveTrackWithStatus,
   saveAccessibleTrackToLibrary,
@@ -40,6 +47,8 @@ import {
   updatePlaylistDetails,
   updateTrackDetails,
   updateProfile,
+  updateNotificationPreferences,
+  unblockPublicUser,
   upsertUser,
 } from "../src/lib/db";
 import type { TelegramUser } from "../src/lib/types";
@@ -501,12 +510,90 @@ test("following and collaborative playlists preserve ownership boundaries and ac
   setPlaylistCollaborative(collaborationOwner, playlistId, false);
   assert.throws(() => addTracksToPlaylist(collaborator, playlistId, [collaboratorTrack.id]), /paused/);
   assert.equal(leaveCollaborativePlaylist(collaborator, playlistId), true);
-  assert.equal(getLibrary(collaborator).recentlyPlayed.some((track) => track.id === ownerTrack.id), false);
+  assert.equal(getLibrary(collaborator).recentlyPlayed.some((track) => track.id === ownerTrack.id), true);
   assert.equal(deleteTracks(collaborator, [collaboratorTrack.id]), 1);
   assert.equal(
     getLibrary(collaborationOwner).notifications.some((notification) => notification.message.includes("removed 1 song from their library")),
     true,
   );
+});
+
+test("visibility, collaboration, public playback, revocation, activity, and undo stay independent", () => {
+  const owner: TelegramUser = { id: 71001, first_name: "Safety Owner" };
+  const collaborator: TelegramUser = { id: 71002, first_name: "Safety Curator" };
+  const listener: TelegramUser = { id: 71003, first_name: "Public Listener" };
+  const ownerTrack = saveTrack(owner, { fileId: "safety-owner-file", fileUniqueId: "safety-owner-unique", sourceChatId: owner.id, sourceMessageId: 1, title: "Safe Song", artist: "Owner", duration: 140 });
+  const guestTrack = saveTrack(collaborator, { fileId: "safety-guest-file", fileUniqueId: "safety-guest-unique", sourceChatId: collaborator.id, sourceMessageId: 2, title: "Guest Song", artist: "Curator", duration: 155 });
+  const playlistId = createPlaylist(owner, { name: "Public safety" });
+  addTracksToPlaylist(owner, playlistId, [ownerTrack.id]);
+  setPlaylistVisibility(owner, playlistId, "public");
+  setPlaylistCollaborative(owner, playlistId, true);
+  const shareId = createPlaylistShare(owner, playlistId);
+
+  const publicPreview = getSharedPlaylistPreview(listener, shareId);
+  assert.ok(getPlaybackFile(String(listener.id), ownerTrack.id), "any authenticated listener can play a public playlist");
+  assert.deepEqual(getOwnedTracks(listener, [ownerTrack.id]).map((track) => track.id), [ownerTrack.id]);
+  assert.equal(publicPreview?.tracks[0]?.access, "public");
+  assert.equal(publicPreview?.tracks[0]?.ownerName, "Safety Owner");
+  assert.equal(joinCollaborativePlaylist(collaborator, shareId).changed, true);
+  assert.equal(addTracksToPlaylist(collaborator, playlistId, [guestTrack.id]), 1);
+
+  setPlaylistVisibility(owner, playlistId, "private");
+  assert.equal(getSharedPlaylistPreview(listener, shareId), null);
+  assert.ok(getPlaybackFile(String(collaborator.id), ownerTrack.id), "private visibility does not silently revoke an explicit collaborator");
+  setPlaylistCollaborative(owner, playlistId, false);
+  assert.throws(() => addTracksToPlaylist(collaborator, playlistId, [guestTrack.id]), /paused/);
+
+  setPlaylistCollaborative(owner, playlistId, true);
+  assert.equal(removeTracksFromPlaylist(collaborator, playlistId, [guestTrack.id]), 1);
+  assert.equal(restoreTracksToPlaylist(collaborator, playlistId, [guestTrack.id]), 1);
+  assert.equal(getLibrary(owner).playlists.find((playlist) => playlist.id === playlistId)?.activity.some((item) => item.trackTitle === "Guest Song"), true);
+
+  const collaboratorPublicId = getPublicProfileId(collaborator);
+  assert.equal(removePlaylistCollaborator(owner, playlistId, collaboratorPublicId), true);
+  assert.equal(getLibrary(collaborator).playlists.some((playlist) => playlist.id === playlistId), false);
+  assert.equal(getLibrary(collaborator).notifications.some((notification) => notification.message.includes("removed Safety Curator")), true);
+  assert.equal(getAccessibleTracks(collaborator, [ownerTrack.id]).length, 0);
+});
+
+test("notification preferences, blocking, reporting, and recommendation dismissal support safety controls", () => {
+  const owner: TelegramUser = { id: 71004, first_name: "Preference Owner" };
+  const collaborator: TelegramUser = { id: 71005, first_name: "Preference Curator" };
+  const ownerTrack = saveTrack(owner, { fileId: "pref-owner-file", fileUniqueId: "pref-owner-unique", sourceChatId: owner.id, sourceMessageId: 1, title: "Owner Public", artist: "Owner", duration: 119 });
+  const track = saveTrack(collaborator, { fileId: "pref-file", fileUniqueId: "pref-unique", sourceChatId: collaborator.id, sourceMessageId: 1, title: "Quiet Add", artist: "Curator", duration: 120 });
+  const playlistId = createPlaylist(owner, { name: "Preference test" });
+  addTracksToPlaylist(owner, playlistId, [ownerTrack.id]);
+  setPlaylistVisibility(owner, playlistId, "public");
+  setPlaylistCollaborative(owner, playlistId, true);
+  const shareId = createPlaylistShare(owner, playlistId);
+  joinCollaborativePlaylist(collaborator, shareId);
+  markNotificationsRead(owner);
+  updateNotificationPreferences(owner, { collaborationActivity: false, playlistUpdates: true });
+  addTracksToPlaylist(collaborator, playlistId, [track.id]);
+  assert.equal(getLibrary(owner).unreadNotifications, 0);
+  updateNotificationPreferences(owner, { collaborationActivity: true, playlistUpdates: true });
+  const groupedTracks = [
+    saveTrack(collaborator, { fileId: "pref-file-2", fileUniqueId: "pref-unique-2", sourceChatId: collaborator.id, sourceMessageId: 2, title: "Grouped One", artist: "Curator", duration: 121 }),
+    saveTrack(collaborator, { fileId: "pref-file-3", fileUniqueId: "pref-unique-3", sourceChatId: collaborator.id, sourceMessageId: 3, title: "Grouped Two", artist: "Curator", duration: 122 }),
+  ];
+  addTracksToPlaylist(collaborator, playlistId, [groupedTracks[0].id]);
+  addTracksToPlaylist(collaborator, playlistId, [groupedTracks[1].id]);
+  assert.equal(getLibrary(owner).notifications.some((notification) => notification.count === 2 && notification.message.includes("2 updates")), true);
+
+  const reportId = reportPublicContent(collaborator, { targetType: "playlist", targetId: shareId, reason: "Test report" });
+  assert.ok(reportId);
+  const songShareId = createTrackShare(owner, ownerTrack.id);
+  recordTrackPlayed(collaborator, ownerTrack.id);
+  assert.equal(getLibrary(collaborator).recentlyPlayed.some((item) => item.id === ownerTrack.id), true);
+  assert.equal(blockPublicUser(collaborator, getPublicProfileId(owner)), true);
+  assert.equal(getSharedPlaylistPreview(collaborator, shareId), null);
+  assert.equal(getSharedSongPreview(collaborator, songShareId), null);
+  assert.throws(() => importSharedSong(collaborator, songShareId), /not found/);
+  assert.equal(getLibrary(collaborator).recentlyPlayed.some((item) => item.id === ownerTrack.id), false);
+  assert.equal(getLibrary(collaborator).availableTracks.some((item) => item.id === ownerTrack.id), false);
+  assert.equal(getLibrary(collaborator).blockedUsers.some((item) => item.publicId === getPublicProfileId(owner)), true);
+  assert.equal(unblockPublicUser(collaborator, getPublicProfileId(owner)), true);
+  assert.ok(getSharedPlaylistPreview(collaborator, shareId));
 });
 
 test("recommendations contain only playable tracks from the listener's own library", async () => {
@@ -524,6 +611,9 @@ test("recommendations contain only playable tracks from the listener's own libra
   assert.ok(library.recommendations.length > 0);
   assert.equal(library.recommendations.every((track) => ownedIds.has(track.id) && track.owned), true);
   assert.equal(library.recommendations[0]?.id, tracks[1].id);
+  assert.match(library.recommendations[0]?.recommendationReason ?? "", /Because you liked/);
+  dismissRecommendation(recommendationUser, tracks[1].id);
+  assert.equal(getLibrary(recommendationUser).recommendations.some((track) => track.id === tracks[1].id), false);
 
   process.env.DEV_TELEGRAM_ID = String(recommendationUser.id);
   try {

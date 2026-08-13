@@ -20,9 +20,21 @@ export type RestoredPlayerState = {
   currentTime: number;
   shuffleEnabled: boolean;
   repeatMode: StoredRepeatMode;
+  unavailableTrackIds: string[];
 };
 
 const MAX_PERSISTED_QUEUE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function storedPlayerTrackIds(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const saved = JSON.parse(raw) as Partial<StoredPlayerState>;
+    if (saved.version !== 1 || !Array.isArray(saved.queueIds) || !Array.isArray(saved.playbackStackIds)) return [];
+    return [...new Set([...saved.queueIds, ...saved.playbackStackIds].filter((id): id is string => typeof id === "string"))].slice(0, 250);
+  } catch {
+    return [];
+  }
+}
 
 export function encodePlayerState(input: Omit<StoredPlayerState, "version" | "savedAt">, savedAt = Date.now()): string {
   return JSON.stringify({ version: 1, savedAt, ...input } satisfies StoredPlayerState);
@@ -50,8 +62,10 @@ export function restorePlayerState(raw: string | null, tracks: Track[], now = Da
   const playableById = new Map(tracks.filter((track) => track.playable && track.streamUrl).map((track) => [track.id, track]));
   const uniqueIds = [...new Set(saved.queueIds.filter((id): id is string => typeof id === "string"))];
   const queue = uniqueIds.flatMap((id) => playableById.get(id) ?? []);
-  const queueIndex = queue.findIndex((track) => track.id === saved.currentTrackId);
-  if (!queue.length || queueIndex < 0) return null;
+  const unavailableTrackIds = uniqueIds.filter((id) => !playableById.has(id));
+  const restoredCurrentIndex = queue.findIndex((track) => track.id === saved.currentTrackId);
+  const queueIndex = restoredCurrentIndex >= 0 ? restoredCurrentIndex : 0;
+  if (!queue.length) return null;
 
   const queueIds = new Set(queue.map((track) => track.id));
   const playbackStack = [...new Set(saved.playbackStackIds.filter((id): id is string => typeof id === "string"))]
@@ -59,7 +73,7 @@ export function restorePlayerState(raw: string | null, tracks: Track[], now = Da
     .flatMap((id) => playableById.get(id) ?? [])
     .slice(-50);
   const duration = queue[queueIndex].duration;
-  const currentTime = Number.isFinite(saved.currentTime)
+  const currentTime = restoredCurrentIndex >= 0 && Number.isFinite(saved.currentTime)
     ? Math.min(Math.max(0, saved.currentTime), Math.max(0, duration - 1))
     : 0;
 
@@ -70,5 +84,6 @@ export function restorePlayerState(raw: string | null, tracks: Track[], now = Da
     currentTime,
     shuffleEnabled: Boolean(saved.shuffleEnabled),
     repeatMode: saved.repeatMode,
+    unavailableTrackIds,
   };
 }

@@ -15,7 +15,8 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - A protected, default Liked Songs collection
 - Full now-playing UI with pause, seek, previous/next, shuffle, and three-state repeat
 - Editable queue with reorder, remove, clear, jump-to-track, and Play Next controls
-- Queue, current position, shuffle, and repeat persist across Mini App restarts
+- User-scoped queue, current position, shuffle, and repeat persistence across Mini App restarts, including collaborator/public tracks
+- Current/next-track preloading, explicit retryable playback errors, visibility-aware position saves, and measured tap-to-audio startup time
 - Durable listening history with Recently Played
 - Telegram album-cover thumbnails when the incoming audio includes one
 - Stateless, Range-aware Telegram streaming for seeking without audio storage
@@ -25,14 +26,18 @@ The project is intentionally one small Next.js service. It owns the UI, Telegram
 - Webhook secret validation and user-scoped database queries
 - Exact Telegram-file duplicate prevention plus conservative title/artist/duration warnings
 - Direct song and public-playlist sharing through validated Mini App deep links
+- Direct playback of every public playlist without importing a copy or joining collaboration
 - Recipient add-to-library prompts, exact playlist imports, and public/private playlist controls
+- Editable public profiles, followed playlists, independently controlled collaboration, collaborator revocation, and playlist activity logs
+- Grouped activity notifications with user preferences, follow/join/report throttles, profile/playlist reporting, and reversible blocking
+- Browsable playlist folders, clear ownership badges, explainable/dismissible recommendations, and Undo for reversible organization actions
 - Editable song titles, artists, and custom artwork with Telegram-artwork reset
 - Immediate bot import progress, explicit failure messages, and a visible 10-minute / 20 MB limit
 - Playback-start, buffering, retry, and import-health diagnostics visible in the Profile tab
 - Library and playlist multi-select for bulk add, move, like, share, send, remove, and delete actions
 - Confirmed removal from My Library, with playlist/history cleanup and live-queue reconciliation
 - Capability-checked Telegram Home Screen shortcuts, native haptic feedback, and in-app bug reports
-- Branded UTYA loading states and desktop keyboard controls
+- Neutral skeleton/loading, empty, offline, retry states, and desktop keyboard controls
 
 ## Playback architecture
 
@@ -139,7 +144,7 @@ Tester reports and their triaged backlog live in [`docs/feedback`](docs/feedback
 - Pagination and Telegram-aware rate limiting for large queues
 - Postgres migration before horizontal scaling
 - Inline mode for sharing a saved track into another chat
-- Admin moderation, abuse controls, quotas, and a privacy policy before a public launch
+- A moderator dashboard, storage/streaming quotas, and a privacy policy before a public launch
 - Optional short-lived edge caching after measuring streaming bandwidth
 
 Users should only save and share audio they have the right to use. For a public launch, document retention and deletion behavior even though this app stores only Telegram file references.

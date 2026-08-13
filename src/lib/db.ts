@@ -41,6 +41,8 @@ type TrackRow = {
   thumbnail_file_id: string | null;
   thumbnail_unique_id: string | null;
   custom_artwork: string | null;
+  owner_name?: string;
+  accessible_as?: "owned" | "collaborator" | "public";
 };
 
 type PlaylistRow = {
@@ -168,13 +170,72 @@ function database(): Database.Database {
       PRIMARY KEY(user_id, playlist_id)
     );
 
+    CREATE TABLE IF NOT EXISTS collaboration_departures (
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+      left_at TEXT NOT NULL,
+      PRIMARY KEY(user_id, playlist_id)
+    );
+
     CREATE TABLE IF NOT EXISTS activity_notifications (
       id TEXT PRIMARY KEY,
       recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
       actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL DEFAULT 'collaboration',
+      event_count INTEGER NOT NULL DEFAULT 1,
       message TEXT NOT NULL,
       read_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      owner_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      collaboration_activity INTEGER NOT NULL DEFAULT 1,
+      playlist_updates INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS playlist_activity (
+      id TEXT PRIMARY KEY,
+      playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+      actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id TEXT REFERENCES tracks(id) ON DELETE SET NULL,
+      track_title TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('added', 'removed')),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(blocker_id, blocked_id),
+      CHECK(blocker_id != blocked_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS content_reports (
+      id TEXT PRIMARY KEY,
+      reporter_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      target_type TEXT NOT NULL CHECK(target_type IN ('profile', 'playlist')),
+      target_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS recommendation_dismissals (
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(owner_id, track_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_actions (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      target_id TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
 
@@ -223,6 +284,12 @@ function database(): Database.Database {
       ON playlist_collaborators(playlist_id, joined_at DESC);
     CREATE INDEX IF NOT EXISTS idx_activity_notifications_recipient
       ON activity_notifications(recipient_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_playlist_activity_playlist
+      ON playlist_activity(playlist_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_content_reports_created
+      ON content_reports(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_user_actions_owner
+      ON user_actions(owner_id, action, created_at DESC);
   `);
 
   const trackColumns = db.pragma("table_info(tracks)") as Array<{ name: string }>;
@@ -279,6 +346,13 @@ function database(): Database.Database {
   if (!playlistColumns.some((column) => column.name === "folder_id")) {
     db.exec("ALTER TABLE playlists ADD COLUMN folder_id TEXT");
   }
+  const notificationColumns = db.pragma("table_info(activity_notifications)") as Array<{ name: string }>;
+  if (!notificationColumns.some((column) => column.name === "event_type")) {
+    db.exec("ALTER TABLE activity_notifications ADD COLUMN event_type TEXT NOT NULL DEFAULT 'collaboration'");
+  }
+  if (!notificationColumns.some((column) => column.name === "event_count")) {
+    db.exec("ALTER TABLE activity_notifications ADD COLUMN event_count INTEGER NOT NULL DEFAULT 1");
+  }
   const usersMissingPublicId = db.prepare("SELECT id FROM users WHERE public_id IS NULL OR public_id = ''")
     .all() as Array<{ id: string }>;
   const setPublicId = db.prepare("UPDATE users SET public_id = ?, display_name = COALESCE(NULLIF(display_name, ''), first_name) WHERE id = ?");
@@ -326,7 +400,12 @@ function normalizeMetadata(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
-function toTrack(row: TrackRow, viewerOwnerId = row.owner_id): Track {
+function toTrack(
+  row: TrackRow,
+  viewerOwnerId = row.owner_id,
+  externalAccess: "collaborator" | "public" = "collaborator",
+): Track {
+  const owned = row.owner_id === viewerOwnerId;
   return {
     id: row.id,
     title: row.title,
@@ -341,7 +420,9 @@ function toTrack(row: TrackRow, viewerOwnerId = row.owner_id): Track {
     hasCustomArtwork: Boolean(row.custom_artwork),
     playable: !row.telegram_file_id.startsWith("demo:"),
     liked: false,
-    owned: row.owner_id === viewerOwnerId,
+    owned,
+    access: owned ? "owned" : externalAccess,
+    ownerName: owned ? null : row.owner_name ?? "Another listener",
   };
 }
 
@@ -372,6 +453,11 @@ export function upsertUser(user: TelegramUser): UserRow {
     INSERT OR IGNORE INTO playlists (id, owner_id, name, description, kind, created_at, updated_at)
     VALUES (?, ?, 'Liked Songs', 'Songs you love', 'liked', ?, ?)
   `).run(randomUUID(), owner.id, timestamp, timestamp);
+  db.prepare(`
+    INSERT OR IGNORE INTO notification_preferences (
+      owner_id, collaboration_activity, playlist_updates, updated_at
+    ) VALUES (?, 1, 1, ?)
+  `).run(owner.id, timestamp);
   return owner;
 }
 
@@ -511,14 +597,20 @@ function seedDemoLibrary(ownerId: string): void {
   );
 }
 
-function tracksForPlaylist(playlistId: string, likedIds: Set<string>, viewerOwnerId?: string): Track[] {
+function tracksForPlaylist(
+  playlistId: string,
+  likedIds: Set<string>,
+  viewerOwnerId?: string,
+  externalAccess: "collaborator" | "public" = "collaborator",
+): Track[] {
   const rows = database().prepare(`
-    SELECT t.* FROM playlist_tracks pt
+    SELECT t.*, COALESCE(NULLIF(u.display_name, ''), u.first_name) AS owner_name FROM playlist_tracks pt
     JOIN tracks t ON t.id = pt.track_id
+    JOIN users u ON u.id = t.owner_id
     WHERE pt.playlist_id = ?
     ORDER BY pt.position ASC
   `).all(playlistId) as TrackRow[];
-  return rows.map((row) => ({ ...toTrack(row, viewerOwnerId), liked: likedIds.has(row.id) }));
+  return rows.map((row) => ({ ...toTrack(row, viewerOwnerId, externalAccess), liked: likedIds.has(row.id) }));
 }
 
 export function getLibrary(user: TelegramUser): LibraryPayload {
@@ -529,6 +621,34 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
   const trackRows = db.prepare(`
     SELECT * FROM tracks WHERE owner_id = ? ORDER BY added_at DESC
   `).all(owner.id) as TrackRow[];
+  const availableTrackRows = db.prepare(`
+    SELECT DISTINCT t.*, COALESCE(NULLIF(track_owner.display_name, ''), track_owner.first_name) AS owner_name,
+      CASE
+        WHEN t.owner_id = ? THEN 'owned'
+        WHEN EXISTS(
+          SELECT 1 FROM playlist_tracks apt
+          JOIN playlist_collaborators apc ON apc.playlist_id = apt.playlist_id
+          WHERE apt.track_id = t.id AND apc.user_id = ?
+        ) THEN 'collaborator'
+        ELSE 'public'
+      END AS accessible_as
+    FROM tracks t
+    JOIN users track_owner ON track_owner.id = t.owner_id
+    WHERE (t.owner_id = ? OR EXISTS(
+      SELECT 1 FROM playlist_tracks apt
+      JOIN playlists ap ON ap.id = apt.playlist_id
+      LEFT JOIN playlist_collaborators apc ON apc.playlist_id = ap.id AND apc.user_id = ?
+      LEFT JOIN playlist_follows apf ON apf.playlist_id = ap.id AND apf.follower_id = ?
+      WHERE apt.track_id = t.id AND (apc.user_id IS NOT NULL OR (ap.visibility = 'public' AND apf.follower_id IS NOT NULL))
+    ) OR EXISTS(
+      SELECT 1 FROM playback_history aph WHERE aph.owner_id = ? AND aph.track_id = t.id
+    )) AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
+    )
+    ORDER BY t.added_at DESC
+  `).all(owner.id, owner.id, owner.id, owner.id, owner.id, owner.id, owner.id, owner.id) as TrackRow[];
   const likedRows = db.prepare(`
     SELECT pt.track_id FROM playlist_tracks pt
     JOIN playlists p ON p.id = pt.playlist_id
@@ -541,13 +661,18 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     WHERE h.owner_id = ? AND (
       t.owner_id = ? OR EXISTS(
         SELECT 1 FROM playlist_tracks pt
-        JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id
-        WHERE pt.track_id = t.id AND pc.user_id = ?
+        JOIN playlists p ON p.id = pt.playlist_id
+        LEFT JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id AND pc.user_id = ?
+        WHERE pt.track_id = t.id AND (pc.user_id IS NOT NULL OR p.visibility = 'public')
       )
+    ) AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
     )
     ORDER BY h.last_played_at DESC
     LIMIT 50
-  `).all(owner.id, owner.id, owner.id) as TrackRow[];
+  `).all(owner.id, owner.id, owner.id, owner.id, owner.id) as TrackRow[];
   const playlistRows = db.prepare(`
     SELECT p.*, COALESCE(NULLIF(u.display_name, ''), u.first_name) AS owner_name,
       CASE WHEN p.owner_id = ? THEN 'owner' ELSE 'collaborator' END AS access,
@@ -565,25 +690,66 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     ORDER BY p.created_at DESC
   `).all(owner.id, owner.id, owner.id, owner.id) as PlaylistRow[];
 
-  const playlists: Playlist[] = playlistRows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    coverSeed: row.cover_seed,
-    coverImage: row.cover_image,
-    kind: row.kind,
-    visibility: row.visibility,
-    access: row.access ?? "owner",
-    ownerName: row.owner_name ?? owner.display_name ?? owner.first_name,
-    collaborative: Boolean(row.collaborative),
-    folderId: row.access === "collaborator" ? null : row.folder_id,
-    followerCount: Number(row.follower_count ?? 0),
-    collaboratorCount: Number(row.collaborator_count ?? 0),
-    createdAt: row.created_at,
-    trackCount: Number(row.track_count),
-    duration: Number(row.duration),
-    tracks: tracksForPlaylist(row.id, likedIds, owner.id),
-  }));
+  const playlists: Playlist[] = playlistRows.map((row) => {
+    const collaborators = row.access === "owner" ? db.prepare(`
+      SELECT u.public_id, COALESCE(NULLIF(u.display_name, ''), u.first_name) AS display_name,
+        u.custom_photo, u.photo_url, pc.joined_at
+      FROM playlist_collaborators pc
+      JOIN users u ON u.id = pc.user_id
+      WHERE pc.playlist_id = ?
+      ORDER BY pc.joined_at ASC
+    `).all(row.id) as Array<{
+      public_id: string; display_name: string; custom_photo: string | null;
+      photo_url: string | null; joined_at: string;
+    }> : [];
+    const activity = db.prepare(`
+      SELECT pa.id, pa.action, pa.track_id, pa.track_title, pa.created_at,
+        COALESCE(NULLIF(u.display_name, ''), u.first_name) AS actor_name
+      FROM playlist_activity pa
+      JOIN users u ON u.id = pa.actor_id
+      WHERE pa.playlist_id = ?
+      ORDER BY pa.created_at DESC
+      LIMIT 20
+    `).all(row.id) as Array<{
+      id: string; action: "added" | "removed"; track_id: string | null;
+      track_title: string; created_at: string; actor_name: string;
+    }>;
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      coverSeed: row.cover_seed,
+      coverImage: row.cover_image,
+      kind: row.kind,
+      visibility: row.visibility,
+      access: row.access ?? "owner",
+      ownerName: row.owner_name ?? owner.display_name ?? owner.first_name,
+      collaborative: Boolean(row.collaborative),
+      folderId: row.access === "collaborator" ? null : row.folder_id,
+      followerCount: Number(row.follower_count ?? 0),
+      collaboratorCount: Number(row.collaborator_count ?? 0),
+      collaborators: collaborators.map((collaborator) => ({
+        publicId: collaborator.public_id,
+        displayName: collaborator.display_name,
+        photoUrl: collaborator.custom_photo
+          ? `/api/profiles/${collaborator.public_id}/photo?v=${artworkRevision(collaborator.custom_photo)}`
+          : collaborator.photo_url,
+        joinedAt: collaborator.joined_at,
+      })),
+      activity: activity.map((item) => ({
+        id: item.id,
+        action: item.action,
+        trackId: item.track_id,
+        trackTitle: item.track_title,
+        actorName: item.actor_name,
+        createdAt: item.created_at,
+      })),
+      createdAt: row.created_at,
+      trackCount: Number(row.track_count),
+      duration: Number(row.duration),
+      tracks: tracksForPlaylist(row.id, likedIds, owner.id),
+    };
+  });
 
   const folderRows = db.prepare(`
     SELECT f.id, f.name, COUNT(p.id) AS playlist_count
@@ -612,23 +778,41 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     followed_at: string; owner_name: string; track_count: number; duration: number;
   }>;
   const notificationRows = db.prepare(`
-    SELECT n.id, n.playlist_id, p.name AS playlist_name, n.message, n.read_at, n.created_at
+    SELECT n.id, n.playlist_id, p.name AS playlist_name, n.message, n.event_count, n.read_at, n.created_at
     FROM activity_notifications n
     JOIN playlists p ON p.id = n.playlist_id
     WHERE n.recipient_id = ?
     ORDER BY n.created_at DESC
     LIMIT 30
   `).all(owner.id) as Array<{
-    id: string; playlist_id: string; playlist_name: string; message: string;
+    id: string; playlist_id: string; playlist_name: string; message: string; event_count: number;
     read_at: string | null; created_at: string;
   }>;
   const unreadNotificationRow = db.prepare(`
     SELECT COUNT(*) AS count FROM activity_notifications
     WHERE recipient_id = ? AND read_at IS NULL
   `).get(owner.id) as { count: number };
+  const preferences = db.prepare(`
+    SELECT collaboration_activity, playlist_updates
+    FROM notification_preferences WHERE owner_id = ?
+  `).get(owner.id) as { collaboration_activity: number; playlist_updates: number };
+  const blockedRows = db.prepare(`
+    SELECT u.public_id, COALESCE(NULLIF(u.display_name, ''), u.first_name) AS display_name,
+      u.custom_photo, u.photo_url, ub.created_at
+    FROM user_blocks ub
+    JOIN users u ON u.id = ub.blocked_id
+    WHERE ub.blocker_id = ?
+    ORDER BY ub.created_at DESC
+  `).all(owner.id) as Array<{
+    public_id: string; display_name: string; custom_photo: string | null;
+    photo_url: string | null; created_at: string;
+  }>;
+  const dismissedRows = db.prepare("SELECT track_id FROM recommendation_dismissals WHERE owner_id = ?")
+    .all(owner.id) as Array<{ track_id: string }>;
+  const dismissedIds = new Set(dismissedRows.map((row) => row.track_id));
   const historyIds = new Set(recentlyPlayedRows.map((row) => row.id));
   const likedArtists = new Set(trackRows.filter((row) => likedIds.has(row.id)).map((row) => normalizeMetadata(row.artist)));
-  const recommendations = (historyIds.size || likedIds.size ? trackRows : [])
+  const recommendations = (historyIds.size || likedIds.size ? trackRows.filter((row) => !dismissedIds.has(row.id)) : [])
     .map((row, index) => ({
       row,
       score: (likedArtists.has(normalizeMetadata(row.artist)) && !likedIds.has(row.id) ? 5 : 0)
@@ -638,7 +822,15 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
     }))
     .sort((left, right) => right.score - left.score || right.row.added_at.localeCompare(left.row.added_at))
     .slice(0, 8)
-    .map(({ row }) => ({ ...toTrack(row, owner.id), liked: likedIds.has(row.id) }));
+    .map(({ row }) => ({
+      ...toTrack(row, owner.id),
+      liked: likedIds.has(row.id),
+      recommendationReason: likedArtists.has(normalizeMetadata(row.artist)) && !likedIds.has(row.id)
+        ? `Because you liked other songs by ${row.artist}`
+        : !historyIds.has(row.id)
+          ? "A track from your library you have not played recently"
+          : "Based on your recent listening",
+    }));
 
   return {
     user: {
@@ -653,6 +845,10 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
       hasCustomPhoto: Boolean(owner.custom_photo),
     },
     tracks: trackRows.map((row) => ({ ...toTrack(row, owner.id), liked: likedIds.has(row.id) })),
+    availableTracks: availableTrackRows.map((row) => ({
+      ...toTrack(row, owner.id, row.accessible_as === "public" ? "public" : "collaborator"),
+      liked: likedIds.has(row.id),
+    })),
     recentlyPlayed: recentlyPlayedRows.map((row) => ({ ...toTrack(row, owner.id), liked: likedIds.has(row.id) })),
     recommendations,
     playlists,
@@ -675,10 +871,23 @@ export function getLibrary(user: TelegramUser): LibraryPayload {
       playlistId: row.playlist_id,
       playlistName: row.playlist_name,
       message: row.message,
+      count: Number(row.event_count),
       read: Boolean(row.read_at),
       createdAt: row.created_at,
     })),
     unreadNotifications: Number(unreadNotificationRow.count),
+    notificationPreferences: {
+      collaborationActivity: Boolean(preferences.collaboration_activity),
+      playlistUpdates: Boolean(preferences.playlist_updates),
+    },
+    blockedUsers: blockedRows.map((blocked) => ({
+      publicId: blocked.public_id,
+      displayName: blocked.display_name,
+      photoUrl: blocked.custom_photo
+        ? `/api/profiles/${blocked.public_id}/photo?v=${artworkRevision(blocked.custom_photo)}`
+        : blocked.photo_url,
+      blockedAt: blocked.created_at,
+    })),
     playbackSummary: getPlaybackSummary(user),
     importSummary: getImportSummary(user),
     demo: trackRows.some((track) => track.telegram_file_id.startsWith("demo:")),
@@ -707,6 +916,7 @@ function notifyPlaylistMembers(
   playlistId: string,
   actorId: string,
   message: string,
+  eventType = "collaboration",
 ): void {
   const recipients = db.prepare(`
     SELECT owner_id AS id FROM playlists WHERE id = ?
@@ -715,12 +925,80 @@ function notifyPlaylistMembers(
   `).all(playlistId, playlistId) as Array<{ id: string }>;
   const insert = db.prepare(`
     INSERT INTO activity_notifications (
-      id, recipient_id, playlist_id, actor_id, message, read_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+      id, recipient_id, playlist_id, actor_id, event_type, event_count, message, read_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, 1, ?, NULL, ?)
   `);
   for (const recipient of recipients) {
-    if (recipient.id !== actorId) insert.run(randomUUID(), recipient.id, playlistId, actorId, message.slice(0, 180), now());
+    if (recipient.id === actorId) continue;
+    const blocked = db.prepare(`
+      SELECT 1 FROM user_blocks
+      WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)
+    `).get(recipient.id, actorId, actorId, recipient.id);
+    if (blocked) continue;
+    const preference = db.prepare(`
+      SELECT collaboration_activity, playlist_updates
+      FROM notification_preferences WHERE owner_id = ?
+    `).get(recipient.id) as { collaboration_activity: number; playlist_updates: number } | undefined;
+    const enabled = eventType.startsWith("playlist_")
+      ? preference?.playlist_updates !== 0
+      : preference?.collaboration_activity !== 0;
+    if (!enabled) continue;
+    const recent = db.prepare(`
+      SELECT id, event_count FROM activity_notifications
+      WHERE recipient_id = ? AND playlist_id = ? AND actor_id = ? AND event_type = ?
+        AND read_at IS NULL AND created_at >= ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(
+      recipient.id,
+      playlistId,
+      actorId,
+      eventType,
+      new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    ) as { id: string; event_count: number } | undefined;
+    if (recent) {
+      const count = Number(recent.event_count) + 1;
+      db.prepare(`
+        UPDATE activity_notifications SET event_count = ?, message = ?, created_at = ? WHERE id = ?
+      `).run(count, `${message.slice(0, 150)} · ${count} updates`, now(), recent.id);
+    } else {
+      insert.run(randomUUID(), recipient.id, playlistId, actorId, eventType, message.slice(0, 180), now());
+    }
   }
+}
+
+function recordPlaylistTrackActivity(
+  db: Database.Database,
+  playlistId: string,
+  actorId: string,
+  tracks: Array<{ id: string; title: string }>,
+  action: "added" | "removed",
+): void {
+  const insert = db.prepare(`
+    INSERT INTO playlist_activity (id, playlist_id, actor_id, track_id, track_title, action, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const track of tracks) {
+    insert.run(randomUUID(), playlistId, actorId, track.id, track.title.slice(0, 120), action, now());
+  }
+}
+
+function enforceActionLimit(db: Database.Database, ownerId: string, action: string, targetId: string): void {
+  const recentTarget = db.prepare(`
+    SELECT 1 FROM user_actions
+    WHERE owner_id = ? AND action = ? AND target_id = ? AND created_at >= ?
+    LIMIT 1
+  `).get(ownerId, action, targetId, new Date(Date.now() - 2_000).toISOString());
+  if (recentTarget) throw new Error("Please wait a moment before trying that again.");
+  const recentCount = db.prepare(`
+    SELECT COUNT(*) AS count FROM user_actions
+    WHERE owner_id = ? AND action = ? AND created_at >= ?
+  `).get(ownerId, action, new Date(Date.now() - 60 * 60 * 1000).toISOString()) as { count: number };
+  const maximum = action === "follow" ? 40 : 15;
+  if (Number(recentCount.count) >= maximum) throw new Error("Too many requests. Please try again later.");
+  db.prepare("INSERT INTO user_actions (id, owner_id, action, target_id, created_at) VALUES (?, ?, ?, ?, ?)")
+    .run(randomUUID(), ownerId, action, targetId, now());
+  db.prepare("DELETE FROM user_actions WHERE created_at < ?")
+    .run(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
 }
 
 export function updateProfile(
@@ -747,8 +1025,9 @@ export function getPublicProfileId(user: TelegramUser): string {
   return upsertUser(user).public_id;
 }
 
-export function getPublicProfile(publicId: string): SharedProfilePreview | null {
+export function getPublicProfile(publicId: string, viewer?: TelegramUser): SharedProfilePreview | null {
   const db = database();
+  const viewerOwner = viewer ? upsertUser(viewer) : null;
   const profile = db.prepare(`
     SELECT id, public_id, COALESCE(NULLIF(display_name, ''), first_name) AS display_name,
       bio, custom_photo
@@ -757,6 +1036,13 @@ export function getPublicProfile(publicId: string): SharedProfilePreview | null 
     id: string; public_id: string; display_name: string; bio: string; custom_photo: string | null;
   } | undefined;
   if (!profile) return null;
+  if (viewerOwner) {
+    const blocked = db.prepare(`
+      SELECT 1 FROM user_blocks
+      WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)
+    `).get(viewerOwner.id, profile.id, profile.id, viewerOwner.id);
+    if (blocked) return null;
+  }
   const publicPlaylists = db.prepare(`
     SELECT p.id, p.share_id, p.name, p.description, p.cover_seed, p.cover_image,
       p.collaborative, COUNT(pt.track_id) AS track_count,
@@ -776,6 +1062,7 @@ export function getPublicProfile(publicId: string): SharedProfilePreview | null 
   const ensureShare = db.prepare("UPDATE playlists SET share_id = COALESCE(share_id, ?), updated_at = ? WHERE id = ?");
   return {
     type: "profile",
+    isOwner: Boolean(viewerOwner && viewerOwner.id === profile.id),
     publicId: profile.public_id,
     displayName: profile.display_name,
     bio: profile.bio,
@@ -844,6 +1131,31 @@ export function markNotificationsRead(user: TelegramUser): number {
   const owner = upsertUser(user);
   return database().prepare("UPDATE activity_notifications SET read_at = ? WHERE recipient_id = ? AND read_at IS NULL")
     .run(now(), owner.id).changes;
+}
+
+export function updateNotificationPreferences(
+  user: TelegramUser,
+  input: { collaborationActivity: boolean; playlistUpdates: boolean },
+): void {
+  const owner = upsertUser(user);
+  database().prepare(`
+    INSERT INTO notification_preferences (owner_id, collaboration_activity, playlist_updates, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(owner_id) DO UPDATE SET
+      collaboration_activity = excluded.collaboration_activity,
+      playlist_updates = excluded.playlist_updates,
+      updated_at = excluded.updated_at
+  `).run(owner.id, input.collaborationActivity ? 1 : 0, input.playlistUpdates ? 1 : 0, now());
+}
+
+export function dismissRecommendation(user: TelegramUser, trackId: string): void {
+  const owner = upsertUser(user);
+  const track = database().prepare("SELECT 1 FROM tracks WHERE id = ? AND owner_id = ?").get(trackId, owner.id);
+  if (!track) throw new Error("Track was not found.");
+  database().prepare(`
+    INSERT OR IGNORE INTO recommendation_dismissals (owner_id, track_id, created_at)
+    VALUES (?, ?, ?)
+  `).run(owner.id, trackId, now());
 }
 
 export function createPlaylist(
@@ -921,7 +1233,7 @@ export function updatePlaylistDetails(
     WHERE id = ? AND owner_id = ? AND kind = 'standard'
   `).run(input.name, input.description, input.coverSeed, input.coverImage, now(), playlistId, owner.id);
   if (!result.changes) throw new Error("Playlist was not found.");
-  notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} updated the playlist details.`);
+  notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} updated the playlist details.`, "playlist_details");
 }
 
 export function updateTrackDetails(
@@ -1057,8 +1369,8 @@ export function addTracksToPlaylist(
   if (access.access === "collaborator" && !access.collaborative) throw new Error("Collaboration is paused for this playlist.");
   const placeholders = uniqueTrackIds.map(() => "?").join(",");
   const ownedTracks = db.prepare(`
-    SELECT id, telegram_file_unique_id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
-  `).all(owner.id, ...uniqueTrackIds) as Array<{ id: string; telegram_file_unique_id: string }>;
+    SELECT id, title, telegram_file_unique_id FROM tracks WHERE owner_id = ? AND id IN (${placeholders})
+  `).all(owner.id, ...uniqueTrackIds) as Array<{ id: string; title: string; telegram_file_unique_id: string }>;
   if (ownedTracks.length !== uniqueTrackIds.length) throw new Error("One or more tracks were not found.");
   const uniqueIdByTrack = new Map(ownedTracks.map((track) => [track.id, track.telegram_file_unique_id]));
   const playlistFileIds = new Set((db.prepare(`
@@ -1077,6 +1389,7 @@ export function addTracksToPlaylist(
   return db.transaction(() => {
     let nextPosition = position.position;
     let added = 0;
+    const addedTracks: Array<{ id: string; title: string }> = [];
     for (const trackId of uniqueTrackIds) {
       const fileUniqueId = uniqueIdByTrack.get(trackId);
       if (!fileUniqueId || playlistFileIds.has(fileUniqueId)) continue;
@@ -1085,14 +1398,18 @@ export function addTracksToPlaylist(
         playlistFileIds.add(fileUniqueId);
         nextPosition += 1;
         added += 1;
+        const addedTrack = ownedTracks.find((track) => track.id === trackId);
+        if (addedTrack) addedTracks.push(addedTrack);
       }
     }
     if (added) {
+      recordPlaylistTrackActivity(db, playlistId, owner.id, addedTracks, "added");
       notifyPlaylistMembers(
         db,
         playlistId,
         owner.id,
         `${owner.display_name || owner.first_name} added ${added} ${added === 1 ? "song" : "songs"}.`,
+        "tracks_added",
       );
       db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now(), playlistId);
     }
@@ -1159,8 +1476,9 @@ export function recordTrackPlayed(user: TelegramUser, trackId: string): void {
     SELECT 1 FROM tracks t WHERE t.id = ? AND (
       t.owner_id = ? OR EXISTS(
         SELECT 1 FROM playlist_tracks pt
-        JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id
-        WHERE pt.track_id = t.id AND pc.user_id = ?
+        JOIN playlists p ON p.id = pt.playlist_id
+        LEFT JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id AND pc.user_id = ?
+        WHERE pt.track_id = t.id AND (pc.user_id IS NOT NULL OR p.visibility = 'public')
       )
     )
   `).get(trackId, owner.id, owner.id);
@@ -1203,16 +1521,15 @@ export function setPlaylistVisibility(
     WHERE id = ? AND owner_id = ? AND kind = 'standard'
   `).run(visibility, visibility, createShareId(), now(), playlistId, owner.id);
   if (!result.changes) throw new Error("Playlist was not found.");
-  notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} made the playlist ${visibility}.`);
+  notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} made the playlist ${visibility}.`, "playlist_visibility");
 }
 
 export function setPlaylistCollaborative(user: TelegramUser, playlistId: string, collaborative: boolean): void {
   const db = database();
   const owner = upsertUser(user);
-  const playlist = db.prepare("SELECT visibility FROM playlists WHERE id = ? AND owner_id = ? AND kind = 'standard'")
-    .get(playlistId, owner.id) as { visibility: "private" | "public" } | undefined;
+  const playlist = db.prepare("SELECT 1 FROM playlists WHERE id = ? AND owner_id = ? AND kind = 'standard'")
+    .get(playlistId, owner.id);
   if (!playlist) throw new Error("Playlist was not found.");
-  if (collaborative && playlist.visibility !== "public") throw new Error("Make this playlist public before enabling collaboration.");
   db.prepare("UPDATE playlists SET collaborative = ?, share_id = COALESCE(share_id, ?), updated_at = ? WHERE id = ?")
     .run(collaborative ? 1 : 0, createShareId(), now(), playlistId);
   notifyPlaylistMembers(
@@ -1220,6 +1537,7 @@ export function setPlaylistCollaborative(user: TelegramUser, playlistId: string,
     playlistId,
     owner.id,
     `${owner.display_name || owner.first_name} ${collaborative ? "enabled" : "paused"} collaboration.`,
+    "playlist_collaboration",
   );
 }
 
@@ -1254,7 +1572,12 @@ export function getSharedSongPreview(user: TelegramUser, shareId: string): Share
     FROM tracks t
     JOIN users u ON u.id = t.owner_id
     WHERE t.share_id = ?
-  `).get(recipient.id, shareId) as {
+      AND NOT EXISTS(
+        SELECT 1 FROM user_blocks ub
+        WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+           OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
+      )
+  `).get(recipient.id, shareId, recipient.id, recipient.id) as {
     title: string;
     artist: string;
     duration: number;
@@ -1279,8 +1602,15 @@ export function importSharedSong(
   user: TelegramUser,
   shareId: string,
 ): { track: Track; created: boolean; possibleDuplicate: Track | null } {
-  const row = database().prepare("SELECT * FROM tracks WHERE share_id = ?")
-    .get(shareId) as TrackRow | undefined;
+  const db = database();
+  const owner = upsertUser(user);
+  const row = db.prepare(`
+    SELECT t.* FROM tracks t WHERE t.share_id = ? AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
+    )
+  `).get(shareId, owner.id, owner.id) as TrackRow | undefined;
   if (!row) throw new Error("Shared song was not found.");
   return saveTrackWithStatus(user, {
     fileId: row.telegram_file_id,
@@ -1304,6 +1634,7 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
   const recipient = upsertUser(user);
   const playlist = db.prepare(`
     SELECT p.id, p.owner_id, p.name, p.description, p.cover_seed, p.cover_image, p.collaborative,
+      u.public_id AS owner_public_id,
       COALESCE(NULLIF(u.display_name, ''), u.first_name) AS owner_name,
       EXISTS(
         SELECT 1 FROM playlists own
@@ -1316,7 +1647,12 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
     FROM playlists p
     JOIN users u ON u.id = p.owner_id
     WHERE p.share_id = ? AND p.visibility = 'public' AND p.kind = 'standard'
-  `).get(recipient.id, recipient.id, recipient.id, shareId) as {
+      AND NOT EXISTS(
+        SELECT 1 FROM user_blocks ub
+        WHERE (ub.blocker_id = ? AND ub.blocked_id = p.owner_id)
+           OR (ub.blocker_id = p.owner_id AND ub.blocked_id = ?)
+      )
+  `).get(recipient.id, recipient.id, recipient.id, shareId, recipient.id, recipient.id) as {
     id: string;
     owner_id: string;
     name: string;
@@ -1324,6 +1660,7 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
     cover_seed: number | null;
     cover_image: string | null;
     owner_name: string;
+    owner_public_id: string;
     already_added: number;
     following: number;
     collaborative: number;
@@ -1332,7 +1669,7 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
     collaborator_count: number;
   } | undefined;
   if (!playlist) return null;
-  const tracks = tracksForPlaylist(playlist.id, new Set());
+  const tracks = tracksForPlaylist(playlist.id, new Set(), recipient.id, "public");
   return {
     type: "playlist",
     shareId,
@@ -1341,6 +1678,7 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
     coverSeed: playlist.cover_seed,
     coverImage: playlist.cover_image,
     ownerName: playlist.owner_name,
+    ownerPublicId: playlist.owner_public_id,
     trackCount: tracks.length,
     duration: tracks.reduce((total, track) => total + track.duration, 0),
     alreadyAdded: Boolean(playlist.already_added),
@@ -1350,7 +1688,7 @@ export function getSharedPlaylistPreview(user: TelegramUser, shareId: string): S
     isOwner: playlist.owner_id === recipient.id,
     followerCount: Number(playlist.follower_count),
     collaboratorCount: Number(playlist.collaborator_count),
-    tracks: tracks.map(({ title, artist, duration, artworkSeed }) => ({ title, artist, duration, artworkSeed })),
+    tracks,
   };
 }
 
@@ -1399,6 +1737,15 @@ export function setPlaylistFollow(user: TelegramUser, shareId: string, following
   if (!playlist) throw new Error("Shared playlist was not found.");
   if (playlist.owner_id === owner.id) return false;
   if (following) {
+    const blocked = db.prepare(`
+      SELECT 1 FROM user_blocks
+      WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)
+    `).get(owner.id, playlist.owner_id, playlist.owner_id, owner.id);
+    if (blocked) throw new Error("This playlist is unavailable.");
+    const existing = db.prepare("SELECT 1 FROM playlist_follows WHERE follower_id = ? AND playlist_id = ?")
+      .get(owner.id, playlist.id);
+    if (existing) return false;
+    enforceActionLimit(db, owner.id, "follow", playlist.id);
     return Boolean(db.prepare(`
       INSERT OR IGNORE INTO playlist_follows (follower_id, playlist_id, created_at)
       VALUES (?, ?, ?)
@@ -1417,6 +1764,14 @@ export function joinCollaborativePlaylist(user: TelegramUser, shareId: string): 
   `).get(shareId) as { id: string; owner_id: string } | undefined;
   if (!playlist) throw new Error("This playlist is not accepting collaborators.");
   if (playlist.owner_id === owner.id) return { changed: false, playlistId: playlist.id };
+  const blocked = db.prepare(`
+    SELECT 1 FROM user_blocks
+    WHERE (blocker_id = ? AND blocked_id = ?) OR (blocker_id = ? AND blocked_id = ?)
+  `).get(owner.id, playlist.owner_id, playlist.owner_id, owner.id);
+  if (blocked) throw new Error("This playlist is unavailable.");
+  const existing = db.prepare("SELECT 1 FROM playlist_collaborators WHERE user_id = ? AND playlist_id = ?")
+    .get(owner.id, playlist.id);
+  if (!existing) enforceActionLimit(db, owner.id, "collaborate", playlist.id);
   return db.transaction(() => {
     const result = db.prepare(`
       INSERT OR IGNORE INTO playlist_collaborators (user_id, playlist_id, joined_at)
@@ -1427,7 +1782,7 @@ export function joinCollaborativePlaylist(user: TelegramUser, shareId: string): 
       VALUES (?, ?, ?)
     `).run(owner.id, playlist.id, now());
     if (result.changes) {
-      notifyPlaylistMembers(db, playlist.id, owner.id, `${owner.display_name || owner.first_name} joined as a collaborator.`);
+      notifyPlaylistMembers(db, playlist.id, owner.id, `${owner.display_name || owner.first_name} joined as a collaborator.`, "collaborator_joined");
     }
     return { changed: Boolean(result.changes), playlistId: playlist.id };
   })();
@@ -1440,10 +1795,111 @@ export function leaveCollaborativePlaylist(user: TelegramUser, playlistId: strin
     const result = db.prepare("DELETE FROM playlist_collaborators WHERE user_id = ? AND playlist_id = ?")
       .run(owner.id, playlistId);
     if (result.changes) {
-      notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} left the collaboration.`);
+      db.prepare(`
+        INSERT INTO collaboration_departures (user_id, playlist_id, left_at) VALUES (?, ?, ?)
+        ON CONFLICT(user_id, playlist_id) DO UPDATE SET left_at = excluded.left_at
+      `).run(owner.id, playlistId, now());
+      notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} left the collaboration.`, "collaborator_left");
     }
     return Boolean(result.changes);
   })();
+}
+
+export function restoreCollaborativePlaylist(user: TelegramUser, playlistId: string): boolean {
+  const db = database();
+  const owner = upsertUser(user);
+  const departure = db.prepare(`
+    SELECT 1 FROM collaboration_departures cd
+    JOIN playlists p ON p.id = cd.playlist_id
+    WHERE cd.user_id = ? AND cd.playlist_id = ? AND p.collaborative = 1 AND cd.left_at >= ?
+  `).get(owner.id, playlistId, new Date(Date.now() - 10 * 60 * 1000).toISOString());
+  if (!departure) throw new Error("This collaboration can no longer be restored.");
+  return db.transaction(() => {
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO playlist_collaborators (user_id, playlist_id, joined_at) VALUES (?, ?, ?)
+    `).run(owner.id, playlistId, now());
+    db.prepare("DELETE FROM collaboration_departures WHERE user_id = ? AND playlist_id = ?").run(owner.id, playlistId);
+    if (result.changes) {
+      notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} rejoined the collaboration.`, "collaborator_joined");
+    }
+    return Boolean(result.changes);
+  })();
+}
+
+export function removePlaylistCollaborator(
+  user: TelegramUser,
+  playlistId: string,
+  collaboratorPublicId: string,
+): boolean {
+  const db = database();
+  const owner = upsertUser(user);
+  const playlist = db.prepare(`
+    SELECT id FROM playlists WHERE id = ? AND owner_id = ? AND kind = 'standard'
+  `).get(playlistId, owner.id);
+  if (!playlist) throw new Error("Playlist was not found.");
+  const collaborator = db.prepare("SELECT id, COALESCE(NULLIF(display_name, ''), first_name) AS name FROM users WHERE public_id = ?")
+    .get(collaboratorPublicId) as { id: string; name: string } | undefined;
+  if (!collaborator) throw new Error("Collaborator was not found.");
+  const membership = db.prepare("SELECT 1 FROM playlist_collaborators WHERE playlist_id = ? AND user_id = ?")
+    .get(playlistId, collaborator.id);
+  if (!membership) return false;
+  return db.transaction(() => {
+    notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} removed ${collaborator.name} from the collaboration.`, "collaborator_removed");
+    return Boolean(db.prepare("DELETE FROM playlist_collaborators WHERE playlist_id = ? AND user_id = ?")
+      .run(playlistId, collaborator.id).changes);
+  })();
+}
+
+export function blockPublicUser(user: TelegramUser, publicId: string): boolean {
+  const db = database();
+  const owner = upsertUser(user);
+  const target = db.prepare("SELECT id FROM users WHERE public_id = ?").get(publicId) as { id: string } | undefined;
+  if (!target) throw new Error("Listener was not found.");
+  if (target.id === owner.id) throw new Error("You cannot block yourself.");
+  return db.transaction(() => {
+    const result = db.prepare(`
+      INSERT OR IGNORE INTO user_blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)
+    `).run(owner.id, target.id, now());
+    db.prepare(`
+      DELETE FROM playlist_follows
+      WHERE (follower_id = ? AND playlist_id IN (SELECT id FROM playlists WHERE owner_id = ?))
+         OR (follower_id = ? AND playlist_id IN (SELECT id FROM playlists WHERE owner_id = ?))
+    `).run(owner.id, target.id, target.id, owner.id);
+    db.prepare(`
+      DELETE FROM playlist_collaborators
+      WHERE (user_id = ? AND playlist_id IN (SELECT id FROM playlists WHERE owner_id = ?))
+         OR (user_id = ? AND playlist_id IN (SELECT id FROM playlists WHERE owner_id = ?))
+    `).run(owner.id, target.id, target.id, owner.id);
+    return Boolean(result.changes);
+  })();
+}
+
+export function unblockPublicUser(user: TelegramUser, publicId: string): boolean {
+  const db = database();
+  const owner = upsertUser(user);
+  const target = db.prepare("SELECT id FROM users WHERE public_id = ?").get(publicId) as { id: string } | undefined;
+  if (!target) throw new Error("Listener was not found.");
+  return Boolean(db.prepare("DELETE FROM user_blocks WHERE blocker_id = ? AND blocked_id = ?")
+    .run(owner.id, target.id).changes);
+}
+
+export function reportPublicContent(
+  user: TelegramUser,
+  input: { targetType: "profile" | "playlist"; targetId: string; reason: string },
+): string {
+  const db = database();
+  const owner = upsertUser(user);
+  const target = input.targetType === "profile"
+    ? db.prepare("SELECT id FROM users WHERE public_id = ?").get(input.targetId) as { id: string } | undefined
+    : db.prepare("SELECT id FROM playlists WHERE share_id = ? AND visibility = 'public'").get(input.targetId) as { id: string } | undefined;
+  if (!target) throw new Error("The reported item is unavailable.");
+  enforceActionLimit(db, owner.id, "report", `${input.targetType}:${target.id}`);
+  const id = randomUUID();
+  db.prepare(`
+    INSERT INTO content_reports (id, reporter_id, target_type, target_id, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, owner.id, input.targetType, target.id, input.reason.slice(0, 500), now());
+  return id;
 }
 
 export function importSharedPlaylist(
@@ -1528,19 +1984,81 @@ export function removeTracksFromPlaylist(
   if (!access) throw new Error("Playlist was not found.");
   if (access.access === "collaborator" && !access.collaborative) throw new Error("Collaboration is paused for this playlist.");
   const placeholders = uniqueTrackIds.map(() => "?").join(",");
+  const removingTracks = db.prepare(`
+    SELECT t.id, t.title FROM playlist_tracks pt
+    JOIN tracks t ON t.id = pt.track_id
+    WHERE pt.playlist_id = ? AND pt.track_id IN (${placeholders})
+  `).all(playlistId, ...uniqueTrackIds) as Array<{ id: string; title: string }>;
   const result = db.prepare(`
     DELETE FROM playlist_tracks
     WHERE playlist_id = ? AND track_id IN (${placeholders})
   `).run(playlistId, ...uniqueTrackIds);
   if (!result.changes) throw new Error("Playlist track was not found.");
+  recordPlaylistTrackActivity(db, playlistId, owner.id, removingTracks, "removed");
   notifyPlaylistMembers(
     db,
     playlistId,
     owner.id,
     `${owner.display_name || owner.first_name} removed ${result.changes} ${result.changes === 1 ? "song" : "songs"}.`,
+    "tracks_removed",
   );
   db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now(), playlistId);
   return Number(result.changes);
+}
+
+export function restoreTracksToPlaylist(
+  user: TelegramUser,
+  playlistId: string,
+  trackIds: string[],
+): number {
+  const db = database();
+  const owner = upsertUser(user);
+  const uniqueTrackIds = [...new Set(trackIds)];
+  if (!uniqueTrackIds.length) return 0;
+  const access = playlistAccess(db, owner.id, playlistId);
+  if (!access) throw new Error("Playlist was not found.");
+  if (access.access === "collaborator" && !access.collaborative) throw new Error("Collaboration is paused for this playlist.");
+  const placeholders = uniqueTrackIds.map(() => "?").join(",");
+  const recent = db.prepare(`
+    SELECT DISTINCT t.id, t.title, t.telegram_file_unique_id
+    FROM playlist_activity pa
+    JOIN tracks t ON t.id = pa.track_id
+    WHERE pa.playlist_id = ? AND pa.actor_id = ? AND pa.action = 'removed'
+      AND pa.track_id IN (${placeholders}) AND pa.created_at >= ?
+  `).all(
+    playlistId,
+    owner.id,
+    ...uniqueTrackIds,
+    new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+  ) as Array<{ id: string; title: string; telegram_file_unique_id: string }>;
+  if (recent.length !== uniqueTrackIds.length) throw new Error("One or more songs can no longer be restored.");
+  const existingFileIds = new Set((db.prepare(`
+    SELECT t.telegram_file_unique_id FROM playlist_tracks pt
+    JOIN tracks t ON t.id = pt.track_id WHERE pt.playlist_id = ?
+  `).all(playlistId) as Array<{ telegram_file_unique_id: string }>).map((row) => row.telegram_file_unique_id));
+  const position = db.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS position FROM playlist_tracks WHERE playlist_id = ?")
+    .get(playlistId) as { position: number };
+  return db.transaction(() => {
+    let nextPosition = Number(position.position);
+    const restored: Array<{ id: string; title: string }> = [];
+    const insert = db.prepare(`
+      INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at) VALUES (?, ?, ?, ?)
+    `);
+    for (const track of recent) {
+      if (existingFileIds.has(track.telegram_file_unique_id)) continue;
+      if (insert.run(playlistId, track.id, nextPosition, now()).changes) {
+        restored.push(track);
+        existingFileIds.add(track.telegram_file_unique_id);
+        nextPosition += 1;
+      }
+    }
+    if (restored.length) {
+      recordPlaylistTrackActivity(db, playlistId, owner.id, restored, "added");
+      notifyPlaylistMembers(db, playlistId, owner.id, `${owner.display_name || owner.first_name} restored ${restored.length} ${restored.length === 1 ? "song" : "songs"}.`, "tracks_added");
+      db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now(), playlistId);
+    }
+    return restored.length;
+  })();
 }
 
 export function deleteTracks(user: TelegramUser, trackIds: string[]): number {
@@ -1565,11 +2083,18 @@ export function deleteTracks(user: TelegramUser, trackIds: string[]): number {
   `).all(...uniqueTrackIds, owner.id) as Array<{ id: string; removed_count: number }>;
   return db.transaction(() => {
     for (const playlist of affectedCollaborations) {
+      const removedTracks = db.prepare(`
+        SELECT t.id, t.title FROM playlist_tracks pt
+        JOIN tracks t ON t.id = pt.track_id
+        WHERE pt.playlist_id = ? AND pt.track_id IN (${placeholders})
+      `).all(playlist.id, ...uniqueTrackIds) as Array<{ id: string; title: string }>;
+      recordPlaylistTrackActivity(db, playlist.id, owner.id, removedTracks, "removed");
       notifyPlaylistMembers(
         db,
         playlist.id,
         owner.id,
         `${owner.display_name || owner.first_name} removed ${playlist.removed_count} ${playlist.removed_count === 1 ? "song" : "songs"} from their library.`,
+        "tracks_removed",
       );
       db.prepare("UPDATE playlists SET updated_at = ? WHERE id = ?").run(now(), playlist.id);
     }
@@ -1622,9 +2147,15 @@ export function getPlaybackFile(telegramId: string, trackId: string): PlaybackFi
     WHERE t.id = ? AND (
       t.owner_id = viewer.id OR EXISTS(
         SELECT 1 FROM playlist_tracks pt
-        JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id
-        WHERE pt.track_id = t.id AND pc.user_id = viewer.id
+        JOIN playlists p ON p.id = pt.playlist_id
+        LEFT JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id AND pc.user_id = viewer.id
+        WHERE pt.track_id = t.id AND (pc.user_id IS NOT NULL OR p.visibility = 'public')
       )
+    )
+    AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = viewer.id AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = viewer.id)
     )
   `).get(telegramId, trackId) as {
     telegram_file_id: string;
@@ -1646,6 +2177,41 @@ export function getPlaybackFile(telegramId: string, trackId: string): PlaybackFi
   } : null;
 }
 
+export function getAccessibleTracks(user: TelegramUser, trackIds: string[]): Track[] {
+  const db = database();
+  const owner = upsertUser(user);
+  const uniqueIds = [...new Set(trackIds)].slice(0, 250);
+  if (!uniqueIds.length) return [];
+  const placeholders = uniqueIds.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT DISTINCT t.*, COALESCE(NULLIF(track_owner.display_name, ''), track_owner.first_name) AS owner_name,
+      CASE WHEN t.owner_id = ? THEN 'owned'
+        WHEN EXISTS(
+          SELECT 1 FROM playlist_tracks cpt JOIN playlist_collaborators cpc ON cpc.playlist_id = cpt.playlist_id
+          WHERE cpt.track_id = t.id AND cpc.user_id = ?
+        ) THEN 'collaborator' ELSE 'public' END AS accessible_as
+    FROM tracks t
+    JOIN users track_owner ON track_owner.id = t.owner_id
+    WHERE t.id IN (${placeholders}) AND (
+      t.owner_id = ? OR EXISTS(
+        SELECT 1 FROM playlist_tracks apt
+        JOIN playlists ap ON ap.id = apt.playlist_id
+        LEFT JOIN playlist_collaborators apc ON apc.playlist_id = ap.id AND apc.user_id = ?
+        WHERE apt.track_id = t.id AND (ap.visibility = 'public' OR apc.user_id IS NOT NULL)
+      )
+    ) AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
+    )
+  `).all(owner.id, owner.id, ...uniqueIds, owner.id, owner.id, owner.id, owner.id) as TrackRow[];
+  const byId = new Map(rows.map((row) => [row.id, {
+    ...toTrack(row, owner.id, row.accessible_as === "public" ? "public" : "collaborator"),
+    liked: false,
+  }]));
+  return uniqueIds.flatMap((id) => byId.get(id) ?? []);
+}
+
 export function getOwnedTracks(user: TelegramUser, trackIds: string[]): TelegramTrack[] {
   if (!trackIds.length) return [];
   const owner = upsertUser(user);
@@ -1655,11 +2221,16 @@ export function getOwnedTracks(user: TelegramUser, trackIds: string[]): Telegram
     FROM tracks t WHERE t.id IN (${placeholders}) AND (
       t.owner_id = ? OR EXISTS(
         SELECT 1 FROM playlist_tracks pt
-        JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id
-        WHERE pt.track_id = t.id AND pc.user_id = ?
+        JOIN playlists p ON p.id = pt.playlist_id
+        LEFT JOIN playlist_collaborators pc ON pc.playlist_id = pt.playlist_id AND pc.user_id = ?
+        WHERE pt.track_id = t.id AND (p.visibility = 'public' OR pc.user_id IS NOT NULL)
       )
+    ) AND NOT EXISTS(
+      SELECT 1 FROM user_blocks ub
+      WHERE (ub.blocker_id = ? AND ub.blocked_id = t.owner_id)
+         OR (ub.blocker_id = t.owner_id AND ub.blocked_id = ?)
     )
-  `).all(...trackIds, owner.id, owner.id) as Array<{
+  `).all(...trackIds, owner.id, owner.id, owner.id, owner.id) as Array<{
     id: string;
     telegram_file_id: string;
     title: string;

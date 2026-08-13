@@ -13,8 +13,27 @@ export type Track = {
   playable: boolean;
   liked: boolean;
   owned: boolean;
+  access: "owned" | "collaborator" | "public";
+  ownerName: string | null;
+  recommendationReason?: string;
   streamUrl?: string;
   artworkUrl?: string;
+};
+
+export type PlaylistCollaborator = {
+  publicId: string;
+  displayName: string;
+  photoUrl: string | null;
+  joinedAt: string;
+};
+
+export type PlaylistActivity = {
+  id: string;
+  action: "added" | "removed";
+  trackId: string | null;
+  trackTitle: string;
+  actorName: string;
+  createdAt: string;
 };
 
 export type Playlist = {
@@ -31,6 +50,8 @@ export type Playlist = {
   folderId: string | null;
   followerCount: number;
   collaboratorCount: number;
+  collaborators: PlaylistCollaborator[];
+  activity: PlaylistActivity[];
   createdAt: string;
   trackCount: number;
   duration: number;
@@ -74,8 +95,16 @@ export type ActivityNotification = {
   playlistId: string;
   playlistName: string;
   message: string;
+  count: number;
   read: boolean;
   createdAt: string;
+};
+
+export type BlockedUser = {
+  publicId: string;
+  displayName: string;
+  photoUrl: string | null;
+  blockedAt: string;
 };
 
 export type SharedPlaylistPreview = {
@@ -86,6 +115,7 @@ export type SharedPlaylistPreview = {
   coverSeed: number | null;
   coverImage: string | null;
   ownerName: string;
+  ownerPublicId: string;
   trackCount: number;
   duration: number;
   alreadyAdded: boolean;
@@ -95,11 +125,12 @@ export type SharedPlaylistPreview = {
   isOwner: boolean;
   followerCount: number;
   collaboratorCount: number;
-  tracks: Array<Pick<Track, "title" | "artist" | "duration" | "artworkSeed">>;
+  tracks: Track[];
 };
 
 export type SharedProfilePreview = {
   type: "profile";
+  isOwner: boolean;
   publicId: string;
   displayName: string;
   bio: string;
@@ -130,6 +161,7 @@ export type LibraryPayload = {
     hasCustomPhoto: boolean;
   };
   tracks: Track[];
+  availableTracks: Track[];
   recentlyPlayed: Track[];
   recommendations: Track[];
   playlists: Playlist[];
@@ -137,6 +169,11 @@ export type LibraryPayload = {
   followedPlaylists: FollowedPlaylist[];
   notifications: ActivityNotification[];
   unreadNotifications: number;
+  notificationPreferences: {
+    collaborationActivity: boolean;
+    playlistUpdates: boolean;
+  };
+  blockedUsers: BlockedUser[];
   playbackSummary: {
     starts: number;
     errors: number;
