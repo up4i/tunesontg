@@ -1,5 +1,5 @@
 import { AuthenticationError, getAuthenticatedUser } from "@/lib/auth";
-import { addTracksToPlaylist, removeTracksFromPlaylist } from "@/lib/db";
+import { addTracksToPlaylist, removeTracksFromPlaylist, restoreTracksToPlaylist } from "@/lib/db";
 
 export const runtime = "nodejs";
 
@@ -50,5 +50,28 @@ export async function DELETE(
   } catch (error) {
     const status = error instanceof AuthenticationError ? 401 : 404;
     return Response.json({ error: error instanceof Error ? error.message : "Could not remove tracks." }, { status });
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<Response> {
+  try {
+    const user = getAuthenticatedUser(request);
+    const { id } = await context.params;
+    const body = await request.json() as { trackIds?: unknown };
+    if (
+      !Array.isArray(body.trackIds)
+      || !body.trackIds.length
+      || body.trackIds.length > 200
+      || body.trackIds.some((trackId) => typeof trackId !== "string")
+    ) {
+      return Response.json({ error: "Choose between 1 and 200 tracks." }, { status: 400 });
+    }
+    return Response.json({ restored: restoreTracksToPlaylist(user, id, body.trackIds as string[]) });
+  } catch (error) {
+    const status = error instanceof AuthenticationError ? 401 : 404;
+    return Response.json({ error: error instanceof Error ? error.message : "Could not restore tracks." }, { status });
   }
 }
